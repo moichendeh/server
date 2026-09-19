@@ -1,27 +1,30 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 
-// Use a throwaway database and a throwaway secret, completely separate from real data.
-process.env.DB_PATH = path.join(os.tmpdir(), 'sermon-scribe-test-' + Date.now() + '.sqlite');
+// A throwaway secret, and a Postgres database dedicated to tests (never your real data).
+// DATABASE_URL_TEST lets you point this at a disposable database; falls back to a local
+// Postgres with a database named sermon_scribe_test.
 process.env.JWT_SECRET = 'test-secret-not-for-real-use';
+process.env.DATABASE_URL = process.env.DATABASE_URL_TEST || 'postgresql://postgres:postgres@localhost:5432/sermon_scribe_test';
 
+const db = require('../db');
 const app = require('../server');
 
 let server, base;
 let adminCookie = '', mediaCookie = '';
 
 test.before(async () => {
+    await db.ready;
+    // Start every run from a clean slate, regardless of what a previous run left behind.
+    await db.exec('DROP TABLE IF EXISTS scripture_mentions, paragraphs, sessions, sermons, bible_cache, settings, users CASCADE');
+    await db.exec(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'db', 'schema.sql'), 'utf8'));
     server = app.listen(0);
     await new Promise(r => server.once('listening', r));
     base = 'http://127.0.0.1:' + server.address().port;
 });
 test.after(async () => {
     await new Promise(r => server.close(r));
-    require('../db').close();
-    fs.rmSync(process.env.DB_PATH, { force: true });
+    await db.close();
 });
 
 function cookieFrom(res) {

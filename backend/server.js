@@ -1,7 +1,9 @@
 require('dotenv').config();
 const path = require('path');
+const http = require('http');
 const express = require('express');
 const cookieParser = require('cookie-parser');
+const attachLive = require('./live');
 
 if (!process.env.JWT_SECRET) {
     console.error('Missing JWT_SECRET. Copy backend/.env.example to backend/.env and fill it in.');
@@ -30,9 +32,22 @@ app.use((err, req, res, next) => {
     res.status(500).json({ ok: false, error: 'Something went wrong on the server.' });
 });
 
+// Wraps app in a plain http.Server so the WebSocket relay (live.js) can share the
+// same port - app.listen() alone would create its own server with no way to attach
+// the "upgrade" handler WebSocket connections need.
+function createServer() {
+    const server = http.createServer(app);
+    attachLive(server);
+    return server;
+}
+
 if (require.main === module) {
+    const db = require('./db');
     const port = process.env.PORT || 3000;
-    app.listen(port, () => console.log(`Sermon Scribe backend listening on http://localhost:${port}`));
+    db.ready.then(() => {
+        createServer().listen(port, () => console.log(`Sermon Scribe backend listening on http://localhost:${port}`));
+    });
 }
 
 module.exports = app;
+module.exports.createServer = createServer;

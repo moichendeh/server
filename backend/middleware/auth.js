@@ -6,7 +6,7 @@ const COOKIE_NAME = 'ss_token';
 // Returns the logged-in user's info from the cookie, or null if there isn't a valid,
 // still-active (not logged-out) session. Shared by every place that needs to know
 // "who, if anyone, is making this request".
-function currentUser(req) {
+async function currentUser(req) {
     const token = req.cookies[COOKIE_NAME];
     if (!token) return null;
     let payload;
@@ -15,15 +15,17 @@ function currentUser(req) {
     } catch (e) {
         return null;
     }
-    if (!db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(payload.jti)) return null;
+    if (!(await db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(payload.jti))) return null;
     return payload;
 }
 
-function requireAuth(req, res, next) {
-    const user = currentUser(req);
-    if (!user) return res.status(401).json({ ok: false, error: 'Please log in.' });
-    req.user = user;
-    next();
+async function requireAuth(req, res, next) {
+    try {
+        const user = await currentUser(req);
+        if (!user) return res.status(401).json({ ok: false, error: 'Please log in.' });
+        req.user = user;
+        next();
+    } catch (e) { next(e); }
 }
 
 function requireRole(...roles) {

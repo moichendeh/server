@@ -1,5 +1,6 @@
 const express = require('express');
 const db = require('../db');
+const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
@@ -15,23 +16,23 @@ const DEFAULTS = {
     projTrDe: 'elb1905'
 };
 
-function readSettings() {
-    const rows = db.prepare('SELECT key, value FROM settings').all();
+async function readSettings() {
+    const rows = await db.prepare('SELECT key, value FROM settings').all();
     const out = { ...DEFAULTS };
     rows.forEach(r => { try { out[r.key] = JSON.parse(r.value); } catch (e) { /* ignore a corrupt row */ } });
     return out;
 }
 
-router.get('/', requireAuth, (req, res) => {
-    res.json({ ok: true, settings: readSettings() });
-});
+router.get('/', requireAuth, asyncHandler(async (req, res) => {
+    res.json({ ok: true, settings: await readSettings() });
+}));
 
-router.patch('/', requireAuth, requireRole('admin', 'notetaker'), (req, res) => {
+router.patch('/', requireAuth, requireRole('admin', 'notetaker'), asyncHandler(async (req, res) => {
     const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
-    Object.keys(DEFAULTS).forEach(key => {
-        if (req.body[key] !== undefined) upsert.run(key, JSON.stringify(req.body[key]));
-    });
-    res.json({ ok: true, settings: readSettings() });
-});
+    for (const key of Object.keys(DEFAULTS)) {
+        if (req.body[key] !== undefined) await upsert.run(key, JSON.stringify(req.body[key]));
+    }
+    res.json({ ok: true, settings: await readSettings() });
+}));
 
 module.exports = router;

@@ -95,6 +95,12 @@ body.proj #app{display:none}
 .projColText sup{font-size:.5em;color:#d9b45a;margin-right:.25em;font-family:system-ui,sans-serif}
 #projPage{flex:0 0 auto;color:#777;font-size:1.8vh;margin-top:1.5vh;font-family:system-ui,sans-serif}
 #projHint{position:fixed;bottom:10px;left:0;right:0;text-align:center;color:#444;font:13px system-ui,sans-serif}
+#projStatus{position:fixed;top:10px;right:10px;font:13px system-ui,sans-serif;padding:3px 10px;border-radius:999px;background:#1a1a1a;color:#999}
+#projStatus.live{color:#8fd19e}
+#projStatus.down{color:#e08a8a}
+#projCtrls{position:fixed;bottom:34px;left:0;right:0;display:flex;justify-content:center;gap:8px}
+#projCtrls button{background:rgba(255,255,255,.08);color:#ddd;border:1px solid #444;font:13px system-ui,sans-serif;padding:6px 14px;border-radius:8px;cursor:pointer}
+#projCtrls button:hover{background:rgba(255,255,255,.16)}
 @media (max-width:860px){
   main{grid-template-columns:1fr}
   #paras{max-height:50vh}
@@ -133,7 +139,8 @@ body.proj #app{display:none}
 <div id="mediaPlaceholder" class="loginWrap" style="display:none">
   <div class="loginCard">
     <div class="brand">Sermon <span>Scribe</span></div>
-    <p>You are logged in as <b>Media</b>. The projector page for this role is coming in Stage B.</p>
+    <p>You are logged in as <b>Media</b>.</p>
+    <button id="mediaOpenProj" class="primary" style="margin-bottom:10px">Open the projector page</button>
     <button id="mediaLogout" class="small">Log out</button>
   </div>
 </div>
@@ -176,6 +183,7 @@ body.proj #app{display:none}
     <span id="status" class="pill">Idle</span>
     <span id="clock" class="pill">00:00</span>
     <span id="syncPill" class="pill"></span>
+    <span id="liveStatus" class="pill"></span>
   </section>
 
   <main>
@@ -280,13 +288,26 @@ body.proj #app{display:none}
 </div>
 
 <div id="proj">
+  <div id="projStatus" class="pill"></div>
   <div id="projRef"></div>
   <div id="projCols">
     <div class="projCol"><div class="projColLabel"></div><div class="projColText"></div></div>
     <div class="projCol"><div class="projColLabel"></div><div class="projColText"></div></div>
   </div>
   <div id="projPage"></div>
+  <div id="projCtrls">
+    <button id="projPrevBtn">Previous</button>
+    <button id="projClearBtn">Clear</button>
+    <button id="projNextBtn">Next</button>
+  </div>
   <div id="projHint">Press F for full screen. + / - changes the text size.</div>
+</div>
+<div id="projLoginMsg" class="loginWrap" style="display:none">
+  <div class="loginCard">
+    <div class="brand">Sermon <span>Scribe</span></div>
+    <p>Please log in at the main app first, then come back to this page.</p>
+    <a href="/">Go to login</a>
+  </div>
 </div>
 <div id="toast" role="status"></div>
 
@@ -294,7 +315,7 @@ body.proj #app{display:none}
 (() => {
 'use strict';
 
-const IS_PROJ = new URLSearchParams(location.search).get('view') === 'projector';
+const IS_PROJ = location.pathname === '/projector' || new URLSearchParams(location.search).get('view') === 'projector';
 
 /* ------------------------------------------------------------------ */
 /* Projector window                                                    */
@@ -361,13 +382,43 @@ if (IS_PROJ) {
     refEl.textContent = '';
     pageEl.textContent = '';
   }
-  window.addEventListener('message', e => {
-    if (e.source !== window.opener) return;
-    const m = e.data;
-    if (!m || m.type !== 'sermonScribe') return;
-    if (m.action === 'show') render(m.payload);
-    if (m.action === 'clear') clear();
-  });
+  // The server only ever tells us "this page changed" (show/clear) or "the page number
+  // changed" (page) - it re-sends the reference and all pages on "show" but not on
+  // "page", so we keep the last-seen ones here to redraw from just a page number.
+  let lastRef = '', lastPages = [];
+  function showFromServer(ref, pages, pageIndex) {
+    lastRef = ref; lastPages = pages || [];
+    render({ ref, columns: lastPages[pageIndex] || [], page: pageIndex + 1, totalPages: lastPages.length });
+  }
+  function pageFromServer(pageIndex) {
+    if (!lastPages.length) return;
+    render({ ref: lastRef, columns: lastPages[pageIndex] || [], page: pageIndex + 1, totalPages: lastPages.length });
+  }
+
+  const statusEl = document.getElementById('projStatus');
+  function setConnStatus(s) {
+    statusEl.className = 'pill' + (s === 'live' ? ' live' : s === 'down' ? ' down' : '');
+    statusEl.textContent = s === 'live' ? 'Connected' : s === 'down' ? 'Disconnected – retrying…' : 'Connecting…';
+  }
+  let ws = null, wsRetry = null;
+  function connectWs() {
+    setConnStatus('connecting');
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws.onopen = () => setConnStatus('live');
+    ws.onclose = () => { setConnStatus('down'); clearTimeout(wsRetry); wsRetry = setTimeout(connectWs, 2000); };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    ws.onmessage = e => {
+      let msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
+      if (msg.type === 'show') showFromServer(msg.ref, msg.pages, msg.pageIndex);
+      else if (msg.type === 'clear') { lastRef = ''; lastPages = []; clear(); }
+      else if (msg.type === 'page') pageFromServer(msg.pageIndex);
+    };
+  }
+  function wsSend(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+  document.getElementById('projClearBtn').addEventListener('click', () => wsSend({ type: 'clear' }));
+  document.getElementById('projNextBtn').addEventListener('click', () => wsSend({ type: 'nav', dir: 1 }));
+  document.getElementById('projPrevBtn').addEventListener('click', () => wsSend({ type: 'nav', dir: -1 }));
+
   window.addEventListener('resize', fit);
   window.addEventListener('keydown', e => {
     if (e.key === 'f' || e.key === 'F') {
@@ -375,12 +426,23 @@ if (IS_PROJ) {
       else document.documentElement.requestFullscreen().catch(() => {});
     } else if (e.key === '+' || e.key === '=') { scale = Math.min(scale * 1.1, 2); fit(); }
     else if (e.key === '-') { scale = Math.max(scale / 1.1, 0.4); fit(); }
+    else if (e.key === 'n' || e.key === 'N') wsSend({ type: 'nav', dir: 1 });
+    else if (e.key === 'b' || e.key === 'B') wsSend({ type: 'nav', dir: -1 });
+    else if (e.key === 'c' || e.key === 'C') wsSend({ type: 'clear' });
   });
   document.addEventListener('dblclick', () => {
     if (document.fullscreenElement) document.exitFullscreen();
     else document.documentElement.requestFullscreen().catch(() => {});
   });
-  if (window.opener) window.opener.postMessage({ type: 'sermonScribe', action: 'ready' }, '*');
+
+  // A self-contained login check (this branch runs before the rest of the script has
+  // set up its own shared state, so it does not reuse checkAuth/api from below).
+  (async () => {
+    let loggedIn = false;
+    try { loggedIn = (await fetch('/api/auth/me')).ok; } catch (e) { /* offline - still show the projector, WS will retry */ }
+    if (!loggedIn) { document.getElementById('projLoginMsg').style.display = ''; return; }
+    connectWs();
+  })();
   return;
 }
 
@@ -1101,18 +1163,31 @@ function renderMentions() {
 /* ------------------------------------------------------------------ */
 /* Projection                                                          */
 /* ------------------------------------------------------------------ */
-function send(action, payload) {
-  if (S.projWin && !S.projWin.closed) S.projWin.postMessage({ type: 'sermonScribe', action, payload }, '*');
+// The live "what's on the projector" channel - a WebSocket to the backend, which
+// relays to every connected /projector page (on this machine or any other device).
+let liveWs = null, liveWsRetry = null;
+function setLiveStatus(s) {
+  const el = $('liveStatus');
+  if (!el) return;
+  el.className = 'pill' + (s === 'live' ? ' live' : s === 'down' ? ' warn' : '');
+  el.textContent = { live: 'Projector: connected', down: 'Projector: disconnected – retrying…', connecting: 'Projector: connecting…' }[s] || '';
 }
+function connectLiveWs() {
+  setLiveStatus('connecting');
+  liveWs = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  liveWs.onopen = () => setLiveStatus('live');
+  liveWs.onclose = () => { setLiveStatus('down'); clearTimeout(liveWsRetry); liveWsRetry = setTimeout(connectLiveWs, 2000); };
+  liveWs.onerror = () => { try { liveWs.close(); } catch (e) {} };
+  liveWs.onmessage = e => {
+    let msg; try { msg = JSON.parse(e.data); } catch (err) { return; }
+    // If a /projector page's own Next/Previous moved the page, mirror that here too.
+    if (msg.type === 'page' && S.live) { S.live.pageIndex = msg.pageIndex; renderLive(); }
+  };
+}
+function liveSend(msg) { if (liveWs && liveWs.readyState === WebSocket.OPEN) liveWs.send(JSON.stringify(msg)); }
 function sendPage() {
   if (!S.live) return;
-  const page = S.live.pages[S.live.pageIndex];
-  send('show', {
-    ref: refLabel(S.live.sg),
-    columns: page,
-    page: S.live.pageIndex + 1,
-    totalPages: S.live.pages.length
-  });
+  liveSend({ type: 'show', ref: refLabel(S.live.sg), pages: S.live.pages, pageIndex: S.live.pageIndex });
 }
 async function project(sg, opts) {
   opts = opts || {};
@@ -1131,7 +1206,6 @@ async function project(sg, opts) {
     sg.status = 'shown';
     sendPage();
     if (opts.auto) toast('Projected automatically: ' + refLabel(S.live.sg) + '.', { label: 'Clear', onClick: clearScreen });
-    else if (!S.projWin || S.projWin.closed) toast('Shown here. Click "Open projector window" to show it on the big screen.');
     renderLive(); renderSugs();
   } catch (e) { toast('Could not load the verse. Check the internet connection.'); }
 }
@@ -1139,13 +1213,13 @@ function projectRef(r) {
   project({ bookNr: r.bookNr, chapter: r.chapter, from: r.from, to: r.to, status: 'pending' });
 }
 function clearScreen() {
-  S.live = null; send('clear'); renderLive();
+  S.live = null; liveSend({ type: 'clear' }); renderLive();
 }
 async function shift(dir) {
   if (!S.live) return;
   if (S.live.pages.length > 1) {
     const ni = S.live.pageIndex + dir;
-    if (ni >= 0 && ni < S.live.pages.length) { S.live.pageIndex = ni; sendPage(); renderLive(); return; }
+    if (ni >= 0 && ni < S.live.pages.length) { S.live.pageIndex = ni; liveSend({ type: 'page', pageIndex: ni }); renderLive(); return; }
   }
   const l = S.live.sg;
   const size = (l.to - l.from) + 1;
@@ -1167,14 +1241,9 @@ function renderLive() {
 }
 function openProjector() {
   if (S.projWin && !S.projWin.closed) { S.projWin.focus(); return; }
-  S.projWin = window.open(location.href.split('?')[0].split('#')[0] + '?view=projector', 'sermonScribeProjector', 'popup=yes,width=1024,height=576');
+  S.projWin = window.open('/projector', 'sermonScribeProjector', 'popup=yes,width=1024,height=576');
   if (!S.projWin) toast('The browser blocked the projector window. Allow pop-ups for this page and try again.');
 }
-window.addEventListener('message', e => {
-  const m = e.data;
-  if (!m || m.type !== 'sermonScribe' || e.source !== S.projWin) return;
-  if (m.action === 'ready' && S.live) sendPage();
-});
 
 /* ------------------------------------------------------------------ */
 /* Speech recognition                                                  */
@@ -1323,12 +1392,14 @@ async function startApp() {
   if (S.user.role === 'media') {
     $('mediaPlaceholder').style.display = '';
     $('mediaLogout').addEventListener('click', async () => { await doLogout(); location.reload(); });
+    $('mediaOpenProj').addEventListener('click', () => { location.href = '/projector'; });
     return;
   }
   $('app').style.display = '';
   $('userBadge').textContent = S.user.email + ' (' + S.user.role + ')';
   $('logoutBtn').addEventListener('click', async () => { await doLogout(); location.reload(); });
   if (S.user.role === 'admin') $('teamCard').style.display = '';
+  connectLiveWs();
 
   const settingsJ = await api('GET', '/api/settings');
   Object.assign(S, settingsJ.settings);
