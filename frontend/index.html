@@ -77,6 +77,9 @@ details.help ol{margin:8px 0 4px;padding-left:20px}
 #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#1d2433;color:#fff;padding:10px 16px;border-radius:10px;max-width:90vw;opacity:0;pointer-events:none;transition:opacity .25s;z-index:20}
 #toast.show{opacity:1}
 .hint{font-size:13px;color:var(--muted)}
+.loginWrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.loginCard{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px;max-width:360px;width:100%;display:flex;flex-direction:column;gap:10px}
+.loginCard label{display:flex;flex-direction:column;gap:4px;font-size:14px;color:var(--muted)}
 /* projector */
 body.proj{background:#000;color:#fff;overflow:hidden}
 #proj{display:none}
@@ -112,7 +115,30 @@ body.proj #app{display:none}
 </head>
 <body>
 
-<div id="app">
+<div id="loginScreen" class="loginWrap">
+  <form id="loginForm" class="loginCard">
+    <div class="brand">Sermon <span>Scribe</span></div>
+    <p class="hint">Log in to your church's account. The very first account anyone creates becomes the Admin.</p>
+    <label>Email<input id="loginEmail" type="email" autocomplete="username" required></label>
+    <label>Password<input id="loginPassword" type="password" autocomplete="current-password" required minlength="8"></label>
+    <div id="loginError" class="err" style="display:none"></div>
+    <div class="btnrow">
+      <button type="submit" class="primary">Log in</button>
+      <button type="button" id="registerBtn">Create account</button>
+    </div>
+    <p class="hint">"Create account" makes a new login. If your church has no account yet, this is how you become Admin.</p>
+  </form>
+</div>
+
+<div id="mediaPlaceholder" class="loginWrap" style="display:none">
+  <div class="loginCard">
+    <div class="brand">Sermon <span>Scribe</span></div>
+    <p>You are logged in as <b>Media</b>. The projector page for this role is coming in Stage B.</p>
+    <button id="mediaLogout" class="small">Log out</button>
+  </div>
+</div>
+
+<div id="app" style="display:none">
   <header>
     <div class="brand">Sermon <span>Scribe</span></div>
     <input id="title" placeholder="Sermon title" aria-label="Sermon title">
@@ -120,6 +146,8 @@ body.proj #app{display:none}
     <select id="sermonSel" aria-label="Saved sermons"></select>
     <button id="newBtn" class="small">New sermon</button>
     <button id="delBtn" class="small ghost">Delete</button>
+    <span id="userBadge" class="pill"></span>
+    <button id="logoutBtn" class="small ghost">Log out</button>
   </header>
 
   <details class="help">
@@ -226,10 +254,26 @@ body.proj #app{display:none}
           <button id="exWord" class="small">Word (.doc)</button>
           <button id="exTxt" class="small">Text (.txt)</button>
           <button id="exPdf" class="small">Print / PDF</button>
-          <button id="exBackup" class="small">Backup all</button>
+          <button id="exBackup" class="small">Backup this sermon</button>
           <button id="imBackup" class="small">Restore backup</button>
           <input id="imFile" type="file" accept=".json,application/json" hidden>
+          <button id="importOldBtn" class="small">Import my old browser sermons</button>
         </div>
+      </section>
+
+      <section class="card" id="teamCard" style="display:none">
+        <h2>Team (Admin only)</h2>
+        <p class="hint">Create a login for someone else. They will use this email and password to log in themselves.</p>
+        <form class="row" id="teamForm" style="flex-wrap:wrap">
+          <input id="teamEmail" type="email" placeholder="Email" required style="flex:1 1 160px">
+          <input id="teamPassword" type="password" placeholder="Password (8+ characters)" minlength="8" required style="flex:1 1 160px">
+          <select id="teamRole">
+            <option value="notetaker">Note-taker</option>
+            <option value="media">Media</option>
+            <option value="admin">Admin</option>
+          </select>
+          <button type="submit" class="primary">Create</button>
+        </form>
       </section>
     </aside>
   </main>
@@ -639,15 +683,14 @@ function getChapter(trKey, nr, ch) {
 /* ------------------------------------------------------------------ */
 const $ = id => document.getElementById(id);
 const uid = () => Math.random().toString(36).slice(2, 10);
-const STORE_KEY = 'sermonScribe.v1';
-const mem = {};
-function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return mem[k] || null; } }
-function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { mem[k] = v; } }
+// The OLD save file this app used before it had a server, kept around only so the
+// "Import my old browser sermons" button can still find and offer to copy it in.
+const OLD_STORE_KEY = 'sermonScribe.v1';
 
 const DEFAULT_TRIGGERS = ['project', 'project it', 'put it on the screen', 'show it', 'media', 'projizieren', 'bitte einblenden', 'auf den bildschirm'];
 
 const S = {
-  sermons: [], curId: null,
+  sermons: [], curId: null, current: null, updatedAt: null, user: null,
   lang: 'en', accent: { en: 'en-GH', de: 'de-CH' }, tr: 'kjv',
   running: false, rec: null, wake: null, timer: null,
   suggestions: [], live: null, lastRef: null, lastFinalAt: 0, tail: '',
@@ -655,128 +698,126 @@ const S = {
   projMode: 'ask', triggerPhrases: DEFAULT_TRIGGERS.slice(),
   projLayout: 'en', projTrEn: 'kjv', projTrDe: 'elb1905'
 };
+function cur() { return S.current; }
 
-function newSermon() {
-  return { id: uid(), title: '', date: new Date().toISOString().slice(0, 10), elapsed: 0, paras: [], mentions: [] };
+/* ------------------------------------------------------------------ */
+/* Talking to the backend                                              */
+/* ------------------------------------------------------------------ */
+async function api(method, url, body) {
+  const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body !== undefined ? JSON.stringify(body) : undefined });
+  let json = null;
+  try { json = await res.json(); } catch (e) { /* no body */ }
+  if (!res.ok) {
+    const err = new Error((json && json.error) || ('HTTP ' + res.status));
+    err.status = res.status; err.body = json;
+    throw err;
+  }
+  return json;
 }
-function cur() { return S.sermons.find(s => s.id === S.curId); }
-function applyState(d) {
-  if (!d || !Array.isArray(d.sermons) || !d.sermons.length) return false;
-  S.sermons = d.sermons; S.curId = d.curId;
-  if (d.lang) S.lang = d.lang;
-  if (d.accent) S.accent = d.accent;
-  if (d.tr && TRANSLATIONS[d.tr]) S.tr = d.tr;
-  if (d.projMode && ['ask', 'auto', 'voice'].includes(d.projMode)) S.projMode = d.projMode;
-  if (Array.isArray(d.triggerPhrases) && d.triggerPhrases.length) S.triggerPhrases = d.triggerPhrases;
-  if (d.projLayout && ['en', 'de', 'both'].includes(d.projLayout)) S.projLayout = d.projLayout;
-  if (d.projTrEn && TRANSLATIONS[d.projTrEn]) S.projTrEn = d.projTrEn;
-  if (d.projTrDe && TRANSLATIONS[d.projTrDe]) S.projTrDe = d.projTrDe;
-  return true;
-}
-function load() {
-  try { applyState(JSON.parse(lsGet(STORE_KEY) || 'null')); } catch (e) { /* ignore */ }
-  if (!S.sermons.length) { const s = newSermon(); S.sermons.push(s); S.curId = s.id; }
-  if (!cur()) S.curId = S.sermons[0].id;
-}
-function snapshot() {
+function shapeSermon(detail) {
   return {
-    sermons: S.sermons, curId: S.curId, lang: S.lang, accent: S.accent, tr: S.tr,
-    projMode: S.projMode, triggerPhrases: S.triggerPhrases,
-    projLayout: S.projLayout, projTrEn: S.projTrEn, projTrDe: S.projTrDe
+    id: detail.id, title: detail.title, date: detail.date, elapsed: detail.elapsed,
+    paras: (detail.paragraphs || []).map(p => ({ id: p.id, t: p.t, lang: p.lang, text: p.text, refs: p.refs || [] })),
+    mentions: detail.mentions || []
   };
 }
-let saveT = null;
-function save() {
-  clearTimeout(saveT);
-  saveT = setTimeout(() => { lsSet(STORE_KEY, JSON.stringify(snapshot())); }, 400);
-  scheduleSync();
+function syncListEntry() {
+  const i = S.sermons.findIndex(x => x.id === S.curId);
+  const entry = { id: S.current.id, title: S.current.title, date: S.current.date, elapsed: S.current.elapsed, updatedAt: S.updatedAt };
+  if (i >= 0) S.sermons[i] = entry; else S.sermons.unshift(entry);
 }
 
-/* ------------------------------------------------------------------ */
-/* Server sync - only active once api.php + config.php are set up on   */
-/* a real server. Until then ACCESS_KEY still says "REPLACE_WITH..."   */
-/* and every function below does nothing, so the app stays exactly the */
-/* same as a purely local, this-browser-only copy.                     */
-/* ------------------------------------------------------------------ */
-const API_URL = 'api.php';
-const ACCESS_KEY = 'REPLACE_WITH_YOUR_SECRET_KEY';
-let serverUpdatedAt = null, conflictWarned = false, syncT = null;
+async function checkAuth() {
+  try { const j = await api('GET', '/api/auth/me'); S.user = j.user; return true; }
+  catch (e) { S.user = null; return false; }
+}
+async function doLogin(email, password) {
+  const j = await api('POST', '/api/auth/login', { email, password });
+  S.user = j.user;
+}
+async function doRegister(email, password, role) {
+  const j = await api('POST', '/api/auth/register', { email, password, role });
+  if (!S.user) S.user = j.user; // an Admin creating a teammate must stay logged in as themselves
+  return j.user;
+}
+async function doLogout() {
+  try { await api('POST', '/api/auth/logout'); } catch (e) { /* ignore */ }
+  S.user = null;
+}
+
+async function openSermon(id) {
+  const j = await api('GET', '/api/sermons/' + id);
+  S.current = shapeSermon(j.sermon);
+  S.curId = j.sermon.id;
+  S.updatedAt = j.sermon.updatedAt;
+  syncListEntry();
+  S.suggestions = []; S.lastRef = null; S.tail = ''; S.recent.clear();
+  fillSermonSel(); renderParas(); renderSugs(); renderMentions();
+  $('title').value = S.current.title || '';
+  $('date').value = S.current.date || '';
+  $('clock').textContent = mmss(S.current.elapsed);
+}
+async function createAndOpenSermon() {
+  const j = await api('POST', '/api/sermons', {});
+  S.sermons.unshift({ id: j.sermon.id, title: j.sermon.title, date: j.sermon.date, elapsed: j.sermon.elapsed, updatedAt: j.sermon.updatedAt });
+  await openSermon(j.sermon.id);
+}
 
 function setSyncStatus(state) {
   const el = $('syncPill');
   if (!el) return;
   el.className = 'pill' + (state === 'ok' ? ' live' : (state === 'error' || state === 'conflict') ? ' warn' : '');
-  el.textContent = {
-    saving: 'Saving…', ok: 'Saved online', error: 'Offline (saved on this device)',
-    conflict: 'Someone else saved – reload this page'
-  }[state] || '';
+  el.textContent = { saving: 'Saving…', ok: 'Saved', error: 'Offline (not saved yet)', conflict: 'Someone else saved – reload this page' }[state] || '';
 }
-async function apiGet() {
-  const r = await fetch(API_URL + '?key=' + encodeURIComponent(ACCESS_KEY));
-  const j = await r.json();
-  if (!j.ok) throw new Error(j.error || 'server error');
-  return j;
-}
-async function apiPost(state) {
-  const r = await fetch(API_URL + '?key=' + encodeURIComponent(ACCESS_KEY), {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state, baseUpdatedAt: serverUpdatedAt })
-  });
-  const j = await r.json();
-  if (!j.ok) {
-    const err = new Error(j.error || 'server error');
-    err.conflict = j.error === 'conflict'; err.updatedAt = j.updatedAt;
-    throw err;
-  }
-  return j;
-}
-function scheduleSync() {
-  if (ACCESS_KEY.startsWith('REPLACE_WITH')) return;
-  clearTimeout(syncT);
-  syncT = setTimeout(syncToServer, 800);
-}
-async function syncToServer() {
+let conflictWarned = false;
+async function saveSermon() {
+  const s = S.current;
+  if (!s) return;
   setSyncStatus('saving');
   try {
-    const j = await apiPost(snapshot());
-    serverUpdatedAt = j.updatedAt; conflictWarned = false;
+    const j = await api('PATCH', '/api/sermons/' + s.id, {
+      title: s.title, date: s.date, elapsed: s.elapsed,
+      paragraphs: s.paras.map(p => ({ t: p.t, lang: p.lang, text: p.text, refs: p.refs || [] })),
+      baseUpdatedAt: S.updatedAt
+    });
+    S.updatedAt = j.sermon.updatedAt;
+    syncListEntry();
+    conflictWarned = false;
     setSyncStatus('ok');
   } catch (e) {
-    if (e.conflict) {
-      serverUpdatedAt = e.updatedAt;
+    if (e.status === 409) {
+      S.updatedAt = e.body.updatedAt;
       if (!conflictWarned) { conflictWarned = true; toast('Someone else saved changes from another device. Reload this page to see them before you keep editing.'); }
       setSyncStatus('conflict');
-    } else { setSyncStatus('error'); }
+    } else setSyncStatus('error');
   }
 }
-function applyUIFromState() {
-  $('trSel').value = S.tr;
-  document.querySelectorAll('#langSeg button').forEach(b => b.classList.toggle('active', b.dataset.lang === S.lang));
-  fillAccents();
-  $('projModeSel').value = S.projMode;
-  $('voiceSettings').style.display = S.projMode === 'voice' ? '' : 'none';
-  $('triggerPhrases').value = (S.triggerPhrases || []).join('\n');
-  $('projTrEnSel').value = S.projTrEn;
-  $('projTrDeSel').value = S.projTrDe;
-  $('projLayoutSel').value = S.projLayout;
-  showSermon();
-}
-async function syncFromServerOnStartup() {
-  if (ACCESS_KEY.startsWith('REPLACE_WITH')) return;
-  setSyncStatus('saving');
+async function saveSettings() {
   try {
-    const j = await apiGet();
-    serverUpdatedAt = j.updatedAt;
-    if (j.data) {
-      applyState(j.data);
-      lsSet(STORE_KEY, JSON.stringify(snapshot()));
-      applyUIFromState();
-    } else {
-      const j2 = await apiPost(snapshot());
-      serverUpdatedAt = j2.updatedAt;
-    }
-    setSyncStatus('ok');
-  } catch (e) { setSyncStatus('error'); }
+    await api('PATCH', '/api/settings', {
+      lang: S.lang, accent: S.accent, tr: S.tr, projMode: S.projMode,
+      triggerPhrases: S.triggerPhrases, projLayout: S.projLayout, projTrEn: S.projTrEn, projTrDe: S.projTrDe
+    });
+  } catch (e) { /* settings are small and non-critical here; a later save will retry */ }
+}
+let saveT = null;
+function save() {
+  clearTimeout(saveT);
+  saveT = setTimeout(() => { saveSermon(); saveSettings(); }, 500);
+}
+async function importOldBrowserSermons() {
+  let raw = null;
+  try { raw = localStorage.getItem(OLD_STORE_KEY); } catch (e) { /* blocked by browser settings */ }
+  let data = null;
+  try { data = raw && JSON.parse(raw); } catch (e) { /* corrupt, ignore */ }
+  if (!data || !Array.isArray(data.sermons) || !data.sermons.length) { toast('No sermons were found saved in this browser.'); return; }
+  try {
+    const j = await api('POST', '/api/import', { sermons: data.sermons });
+    toast('Imported ' + j.imported + ' sermon(s) from this browser' + (j.skipped ? ' (skipped ' + j.skipped + ' already imported before)' : '') + '.');
+    const list = await api('GET', '/api/sermons');
+    S.sermons = list.sermons;
+    fillSermonSel();
+  } catch (e) { toast('Import failed: ' + e.message); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1229,14 +1270,6 @@ function fillSermonSel() {
     sel.append(h('option', { value: s.id }, (s.date || '') + '  ' + (s.title || 'Untitled'))));
   sel.value = S.curId;
 }
-function showSermon() {
-  const s = cur();
-  $('title').value = s.title || '';
-  $('date').value = s.date || '';
-  $('clock').textContent = mmss(s.elapsed);
-  S.suggestions = []; S.lastRef = null; S.tail = ''; S.recent.clear();
-  fillSermonSel(); renderParas(); renderSugs(); renderMentions();
-}
 function download(name, mime, data) {
   const url = URL.createObjectURL(new Blob([data], { type: mime }));
   const a = h('a', { href: url, download: name });
@@ -1264,17 +1297,20 @@ function exportWord() {
   download(fname('doc'), 'application/msword', '\ufeff' + html);
 }
 function exportBackup() {
-  download('sermon-scribe-backup.json', 'application/json', JSON.stringify({ sermons: S.sermons }, null, 1));
+  download(fname('json'), 'application/json', JSON.stringify({ sermons: [cur()] }, null, 1));
 }
 function importBackup(file) {
   const fr = new FileReader();
-  fr.onload = () => {
+  fr.onload = async () => {
     try {
       const d = JSON.parse(fr.result);
       if (!Array.isArray(d.sermons)) throw new Error('bad');
-      d.sermons.forEach(x => { if (!S.sermons.some(y => y.id === x.id)) S.sermons.push(x); });
-      save(); fillSermonSel(); toast('Backup restored.');
-    } catch (e) { toast('That file is not a Sermon Scribe backup.'); }
+      const j = await api('POST', '/api/import', { sermons: d.sermons });
+      const list = await api('GET', '/api/sermons');
+      S.sermons = list.sermons;
+      fillSermonSel();
+      toast('Restored ' + j.imported + ' sermon(s)' + (j.skipped ? ', skipped ' + j.skipped + ' already present' : '') + '.');
+    } catch (e) { toast('That file could not be restored: ' + e.message); }
   };
   fr.readAsText(file);
 }
@@ -1282,13 +1318,31 @@ function importBackup(file) {
 /* ------------------------------------------------------------------ */
 /* Wire up                                                             */
 /* ------------------------------------------------------------------ */
-function init() {
-  load();
+async function startApp() {
+  $('loginScreen').style.display = 'none';
+  if (S.user.role === 'media') {
+    $('mediaPlaceholder').style.display = '';
+    $('mediaLogout').addEventListener('click', async () => { await doLogout(); location.reload(); });
+    return;
+  }
+  $('app').style.display = '';
+  $('userBadge').textContent = S.user.email + ' (' + S.user.role + ')';
+  $('logoutBtn').addEventListener('click', async () => { await doLogout(); location.reload(); });
+  if (S.user.role === 'admin') $('teamCard').style.display = '';
+
+  const settingsJ = await api('GET', '/api/settings');
+  Object.assign(S, settingsJ.settings);
+
+  const list = await api('GET', '/api/sermons');
+  S.sermons = list.sermons;
+  if (!S.sermons.length) await createAndOpenSermon();
+  else await openSermon(S.sermons[0].id);
+
   Object.entries(TRANSLATIONS).forEach(([k, v]) => $('trSel').append(h('option', { value: k }, v.label)));
   $('trSel').value = S.tr;
   document.querySelectorAll('#langSeg button').forEach(b => b.addEventListener('click', () => setLang(b.dataset.lang)));
   document.querySelectorAll('#langSeg button').forEach(b => b.classList.toggle('active', b.dataset.lang === S.lang));
-  fillAccents(); setStatus(); showSermon(); renderLive();
+  fillAccents(); setStatus(); renderLive();
 
   $('projModeSel').value = S.projMode;
   $('voiceSettings').style.display = S.projMode === 'voice' ? '' : 'none';
@@ -1321,16 +1375,17 @@ function init() {
     document.querySelectorAll('.prefs').forEach(pe => { /* labels follow the translation language */ });
     renderParas();
   });
-  $('title').addEventListener('input', e => { cur().title = e.target.value; fillSermonSel(); save(); });
-  $('date').addEventListener('input', e => { cur().date = e.target.value; fillSermonSel(); save(); });
-  $('sermonSel').addEventListener('change', e => { if (S.running) stopRec(); S.curId = e.target.value; save(); showSermon(); });
-  $('newBtn').addEventListener('click', () => { if (S.running) stopRec(); const s = newSermon(); S.sermons.push(s); S.curId = s.id; save(); showSermon(); });
-  $('delBtn').addEventListener('click', () => {
+  $('title').addEventListener('input', e => { cur().title = e.target.value; syncListEntry(); fillSermonSel(); save(); });
+  $('date').addEventListener('input', e => { cur().date = e.target.value; syncListEntry(); fillSermonSel(); save(); });
+  $('sermonSel').addEventListener('change', async e => { if (S.running) stopRec(); await openSermon(Number(e.target.value)); });
+  $('newBtn').addEventListener('click', async () => { if (S.running) stopRec(); await createAndOpenSermon(); });
+  $('delBtn').addEventListener('click', async () => {
     if (!confirm('Delete this sermon and its notes? This cannot be undone.')) return;
     if (S.running) stopRec();
+    await api('DELETE', '/api/sermons/' + S.curId);
     S.sermons = S.sermons.filter(s => s.id !== S.curId);
-    if (!S.sermons.length) S.sermons.push(newSermon());
-    S.curId = S.sermons[0].id; save(); showSermon();
+    if (!S.sermons.length) await createAndOpenSermon();
+    else await openSermon(S.sermons[0].id);
   });
   $('quick').addEventListener('submit', e => {
     e.preventDefault();
@@ -1358,6 +1413,16 @@ function init() {
   $('exBackup').addEventListener('click', exportBackup);
   $('imBackup').addEventListener('click', () => $('imFile').click());
   $('imFile').addEventListener('change', e => { if (e.target.files[0]) importBackup(e.target.files[0]); e.target.value = ''; });
+  $('importOldBtn').addEventListener('click', importOldBrowserSermons);
+  $('teamForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = $('teamEmail').value.trim(), password = $('teamPassword').value, role = $('teamRole').value;
+    try {
+      await doRegister(email, password, role);
+      toast('Account created for ' + email + ' (' + role + ').');
+      $('teamForm').reset();
+    } catch (err) { toast('Could not create that account: ' + err.message); }
+  });
 
   document.addEventListener('keydown', e => {
     const a = document.activeElement;
@@ -1373,13 +1438,35 @@ function init() {
     else if (k === 'n') { e.preventDefault(); shift(1); }
     else if (k === 'b') { e.preventDefault(); shift(-1); }
   });
-  window.addEventListener('beforeunload', () => { clearTimeout(saveT); lsSet(STORE_KEY, JSON.stringify(snapshot())); });
+  window.addEventListener('beforeunload', () => { if (saveT) { clearTimeout(saveT); saveSermon(); saveSettings(); } });
   if (!SR) toast('Live transcription needs Chrome or Edge. You can still type notes and find verses here.');
-  syncFromServerOnStartup();
+}
+
+async function boot() {
+  const loggedIn = await checkAuth();
+  if (loggedIn) { await startApp(); return; }
+
+  $('loginForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    $('loginError').style.display = 'none';
+    try {
+      await doLogin($('loginEmail').value.trim(), $('loginPassword').value);
+      await startApp();
+    } catch (err) { $('loginError').textContent = err.message; $('loginError').style.display = ''; }
+  });
+  $('registerBtn').addEventListener('click', async () => {
+    $('loginError').style.display = 'none';
+    const email = $('loginEmail').value.trim(), password = $('loginPassword').value;
+    if (!email || password.length < 8) { $('loginError').textContent = 'Enter an email and an 8+ character password first.'; $('loginError').style.display = ''; return; }
+    try {
+      await doRegister(email, password);
+      await startApp();
+    } catch (err) { $('loginError').textContent = err.message; $('loginError').style.display = ''; }
+  });
 }
 
 window.__ss = { detect, normalize, wordsToDigits, BOOKS, paginate, normPhrase };
-init();
+boot();
 })();
 </script>
 </body>
