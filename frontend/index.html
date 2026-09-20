@@ -98,9 +98,10 @@ body.proj #app{display:none}
 #projStatus{position:fixed;top:10px;right:10px;font:13px system-ui,sans-serif;padding:3px 10px;border-radius:999px;background:#1a1a1a;color:#999}
 #projStatus.live{color:#8fd19e}
 #projStatus.down{color:#e08a8a}
-#projCtrls{position:fixed;bottom:34px;left:0;right:0;display:flex;justify-content:center;gap:8px}
+#projCtrls{position:fixed;bottom:34px;left:0;right:0;display:none;justify-content:center;gap:8px}
 #projCtrls button{background:rgba(255,255,255,.08);color:#ddd;border:1px solid #444;font:13px system-ui,sans-serif;padding:6px 14px;border-radius:8px;cursor:pointer}
 #projCtrls button:hover{background:rgba(255,255,255,.16)}
+#projWaiting{position:fixed;inset:0;z-index:50;background:#000;color:#666;display:flex;align-items:center;justify-content:center;font:16px system-ui,sans-serif;text-align:center;padding:0 20px}
 @media (max-width:860px){
   main{grid-template-columns:1fr}
   #paras{max-height:50vh}
@@ -239,6 +240,14 @@ body.proj #app{display:none}
           <label class="inl">German translation <select id="projTrDeSel"></select></label>
         </div>
         <p class="hint">This is the translation shown on the projector. The "Bible" translation in the toolbar above is only for the suggestion cards and the mentions list.</p>
+        <div class="setting" style="margin-top:10px;flex-direction:column;align-items:stretch">
+          <label for="projLinkBox" class="hint">Projector link (share this with the media team - no login needed on their end, and it only ever shows the projected verse, never your notes):</label>
+          <input id="projLinkBox" type="text" readonly style="margin-top:4px">
+          <div class="btnrow" style="margin-top:8px">
+            <button id="copyProjLinkBtn" class="small">Copy link</button>
+            <button id="newProjCodeBtn" class="small ghost">New link (stops old ones working)</button>
+          </div>
+        </div>
       </section>
 
       <section class="card">
@@ -302,13 +311,7 @@ body.proj #app{display:none}
   </div>
   <div id="projHint">Press F for full screen. + / - changes the text size.</div>
 </div>
-<div id="projLoginMsg" class="loginWrap" style="display:none">
-  <div class="loginCard">
-    <div class="brand">Sermon <span>Scribe</span></div>
-    <p>Please log in at the main app first, then come back to this page.</p>
-    <a href="/">Go to login</a>
-  </div>
-</div>
+<div id="projWaiting" style="display:none">Waiting for the projector link</div>
 <div id="toast" role="status"></div>
 
 <script>
@@ -400,10 +403,11 @@ if (IS_PROJ) {
     statusEl.className = 'pill' + (s === 'live' ? ' live' : s === 'down' ? ' down' : '');
     statusEl.textContent = s === 'live' ? 'Connected' : s === 'down' ? 'Disconnected – retrying…' : 'Connecting…';
   }
-  let ws = null, wsRetry = null;
+  let ws = null, wsRetry = null, screenCode = null, controlsEnabled = false;
   function connectWs() {
     setConnStatus('connecting');
-    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    const qs = screenCode ? ('?code=' + encodeURIComponent(screenCode)) : '';
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + qs);
     ws.onopen = () => setConnStatus('live');
     ws.onclose = () => { setConnStatus('down'); clearTimeout(wsRetry); wsRetry = setTimeout(connectWs, 2000); };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
@@ -414,7 +418,10 @@ if (IS_PROJ) {
       else if (msg.type === 'page') pageFromServer(msg.pageIndex);
     };
   }
-  function wsSend(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+  // The server silently ignores show/clear/nav from a connection that only has a
+  // screen code (view-only) - this local check just keeps the UI from offering
+  // buttons that would not do anything, it is not what actually enforces that.
+  function wsSend(msg) { if (controlsEnabled && ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
   document.getElementById('projClearBtn').addEventListener('click', () => wsSend({ type: 'clear' }));
   document.getElementById('projNextBtn').addEventListener('click', () => wsSend({ type: 'nav', dir: 1 }));
   document.getElementById('projPrevBtn').addEventListener('click', () => wsSend({ type: 'nav', dir: -1 }));
@@ -435,12 +442,23 @@ if (IS_PROJ) {
     else document.documentElement.requestFullscreen().catch(() => {});
   });
 
-  // A self-contained login check (this branch runs before the rest of the script has
-  // set up its own shared state, so it does not reuse checkAuth/api from below).
+  // No login is needed here at all - a "screen code" in the link (?code=...) is what
+  // grants a bare screen the right to WATCH. Remember it in this browser so a plain
+  // reload (or reopening the link later) does not need the full URL retyped.
   (async () => {
+    const codeFromUrl = new URLSearchParams(location.search).get('code');
+    if (codeFromUrl) { try { localStorage.setItem('ssProjCode', codeFromUrl); } catch (e) {} }
+    screenCode = codeFromUrl || (() => { try { return localStorage.getItem('ssProjCode'); } catch (e) { return null; } })();
+
     let loggedIn = false;
-    try { loggedIn = (await fetch('/api/auth/me')).ok; } catch (e) { /* offline - still show the projector, WS will retry */ }
-    if (!loggedIn) { document.getElementById('projLoginMsg').style.display = ''; return; }
+    try { loggedIn = (await fetch('/api/auth/me')).ok; } catch (e) { /* offline - still worth trying with a code, if any */ }
+
+    if (!screenCode && !loggedIn) {
+      document.getElementById('projWaiting').style.display = 'flex';
+      return; // nothing to connect with - do not attempt a WebSocket at all
+    }
+    controlsEnabled = loggedIn;
+    document.getElementById('projCtrls').style.display = loggedIn ? 'flex' : 'none';
     connectWs();
   })();
   return;
@@ -1241,8 +1259,27 @@ function renderLive() {
 }
 function openProjector() {
   if (S.projWin && !S.projWin.closed) { S.projWin.focus(); return; }
-  S.projWin = window.open('/projector', 'sermonScribeProjector', 'popup=yes,width=1024,height=576');
+  S.projWin = window.open(projectorLink() || '/projector', 'sermonScribeProjector', 'popup=yes,width=1024,height=576');
   if (!S.projWin) toast('The browser blocked the projector window. Allow pop-ups for this page and try again.');
+}
+// The "screen code" is what lets a bare /projector screen watch with no login at all -
+// it can never read or change sermons, notes, or anything else (the server enforces
+// that, not this page). One code is valid at a time; making a new one revokes the old.
+function projectorLink() {
+  return S.screenCode ? (location.origin + '/projector?code=' + encodeURIComponent(S.screenCode)) : '';
+}
+function updateProjLinkBox() { const box = $('projLinkBox'); if (box) box.value = projectorLink(); }
+async function loadScreenCode() {
+  try { S.screenCode = (await api('GET', '/api/screen-code')).code; updateProjLinkBox(); }
+  catch (e) { /* not fatal - Open projector window will just open without a code */ }
+}
+async function regenerateScreenCode() {
+  if (!confirm('This stops the current projector link from working on any device using it. Continue?')) return;
+  try {
+    S.screenCode = (await api('POST', '/api/screen-code')).code;
+    updateProjLinkBox();
+    toast('New projector link created. Old links no longer work.');
+  } catch (e) { toast('Could not create a new link: ' + e.message); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1400,6 +1437,14 @@ async function startApp() {
   $('logoutBtn').addEventListener('click', async () => { await doLogout(); location.reload(); });
   if (S.user.role === 'admin') $('teamCard').style.display = '';
   connectLiveWs();
+  loadScreenCode();
+  $('copyProjLinkBtn').addEventListener('click', async () => {
+    const link = projectorLink();
+    if (!link) { toast('No projector link yet.'); return; }
+    try { await navigator.clipboard.writeText(link); toast('Projector link copied.'); }
+    catch (e) { toast('Could not copy automatically - select the text in the box and copy it manually.'); }
+  });
+  $('newProjCodeBtn').addEventListener('click', regenerateScreenCode);
 
   const settingsJ = await api('GET', '/api/settings');
   Object.assign(S, settingsJ.settings);

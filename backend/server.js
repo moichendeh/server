@@ -18,6 +18,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/sermons', require('./routes/sermons'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/import', require('./routes/import'));
+app.use('/api/screen-code', require('./routes/screenCode'));
 
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
 

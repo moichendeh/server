@@ -100,20 +100,31 @@ default - only a logged-in Admin can hand out the Admin or Media role, from the 
 
 ## Using the live projector (Stage B)
 
-- Click **"Open projector window"** on the notes page, or have any other device (a
-  tablet, another laptop) open `http://<this computer's address>:3000/projector` and
-  log in there.
-- Every screen that has `/projector` open updates the instant a verse is projected
-  from the notes page - or the instant anyone clicks Next/Previous/Clear on *any*
-  connected projector screen (they all stay in sync with each other and with the
-  notes page's "On the screen now" panel).
+`/projector` needs **no login at all** - it opens straight to whatever is currently
+projected (or a plain "Waiting for the projector link" screen if nothing has been
+shared with it yet). What it's allowed to *do* depends on how it got there:
+
+- **Sharing it with the media team**: on the notes page, under "Projector settings",
+  there's a **projector link** with a **Copy link** button. Share that link (not the
+  bare `/projector` URL) with whoever is running the second screen - it contains a
+  "screen code" that lets that device watch the live feed. It is view-only: that
+  device can never read or change sermons, notes, or anything else, even if someone
+  opens the browser's developer tools and tries - the server itself refuses any
+  control message from a code-only connection, this isn't just a hidden button.
+  Clicking **"New link"** immediately invalidates the old one (anyone still on it
+  stops receiving updates) - use this if a link was shared too widely or a device is
+  no longer needed.
+- **Opening it on your own logged-in browser** (e.g. "Open projector window", or a
+  Media-role account) - the same page, but because it's logged in, it also gets
+  Next/Previous/Clear buttons to control what's projected, kept in sync with every
+  other connected screen (the notes page's "On the screen now" panel included).
 - A small pill in the corner says **Connected**, or **Disconnected - retrying...** if
   the network drops - it reconnects on its own once the network is back, no need to
   reload the page.
-- A `/projector` screen with no notes page open can still page through whatever was
-  already sent to it (Next/Previous/Clear), but can't pull up a *different* verse on
-  its own - that part still needs the notes page, since that's what knows how to look
-  up Bible text.
+- Either kind of `/projector` screen can page through whatever pages it was already
+  sent (if it's allowed to control anything at all - see above), but can't pull up a
+  *different* verse on its own - that part still needs the notes page, since that's
+  what knows how to look up Bible text.
 
 ## Running the automated tests
 
@@ -127,11 +138,13 @@ database - never your real data:
 
 - **test/api.test.js** - logins, roles, saving/loading sermons, the conflict check for
   two people saving at once, settings, and the "import old sermons" feature.
-- **test/live.test.js** - the live projector channel: only logged-in devices can
-  connect, projecting reaches every other connected screen, a screen that joins late
-  still sees whatever is currently live, paging Next/Previous/Clear from a projector
-  screen keeps everyone in sync, and going past the last page is refused rather than
-  breaking anything.
+- **test/live.test.js** - the live projector channel: logged-in devices or a valid
+  screen code can connect, projecting reaches every other connected screen, a screen
+  that joins late still sees whatever is currently live, paging Next/Previous/Clear
+  keeps everyone in sync, going past the last page is refused, a code-only connection
+  can watch but its own control messages are silently ignored by the server (not just
+  hidden in the UI), a stale/invalid code is rejected, and creating a new code revokes
+  the old one.
 
 By default these run against `sermon_scribe_test` / `sermon_scribe_test_live` on a
 local Postgres. Point them elsewhere with `DATABASE_URL_TEST` / `DATABASE_URL_TEST_LIVE`.
