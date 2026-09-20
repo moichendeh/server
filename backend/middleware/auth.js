@@ -15,7 +15,10 @@ async function currentUser(req) {
     } catch (e) {
         return null;
     }
-    if (!(await db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(payload.jti))) return null;
+    const row = await db.prepare(
+        'SELECT u.is_disabled FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ?'
+    ).get(payload.jti);
+    if (!row || row.is_disabled) return null; // logged out, OR the account was disabled since this cookie was issued
     return payload;
 }
 

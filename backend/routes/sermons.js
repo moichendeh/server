@@ -1,16 +1,19 @@
 const express = require('express');
 const db = require('../db');
 const asyncHandler = require('../middleware/asyncHandler');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
-router.use(requireAuth, requireRole('admin', 'notetaker'));
+router.use(requireAuth);
 
-async function getSermonDetail(dbOrTx, id) {
-    const sermon = await dbOrTx.prepare('SELECT * FROM sermons WHERE id = ?').get(id);
+// Every one of these functions takes the logged-in user's id and filters by it -
+// never trusts the :id in the URL alone. A sermon that exists but belongs to someone
+// else looks exactly like a sermon that does not exist at all (404), on purpose.
+async function getSermonDetail(dbOrTx, id, userId) {
+    const sermon = await dbOrTx.prepare('SELECT * FROM sermons WHERE id = ? AND user_id = ?').get(id, userId);
     if (!sermon) return null;
-    const paraRows = await dbOrTx.prepare('SELECT * FROM paragraphs WHERE sermon_id = ? ORDER BY seq').all(id);
-    const mentionRows = await dbOrTx.prepare('SELECT * FROM scripture_mentions WHERE sermon_id = ? ORDER BY id').all(id);
+    const paraRows = await dbOrTx.prepare('SELECT * FROM paragraphs WHERE sermon_id = ? AND user_id = ? ORDER BY seq').all(id, userId);
+    const mentionRows = await dbOrTx.prepare('SELECT * FROM scripture_mentions WHERE sermon_id = ? AND user_id = ? ORDER BY id').all(id, userId);
 
     const paragraphs = paraRows.map(p => ({
         id: p.id,
@@ -41,54 +44,65 @@ async function getSermonDetail(dbOrTx, id) {
     };
 }
 
+// :id in the URL is always attacker-controlled input - if it is not even a plain
+// number, there is no point asking the database at all.
+function parseId(req, res) {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) { res.status(404).json({ ok: false, error: 'Sermon not found.' }); return null; }
+    return id;
+}
+
 router.get('/', asyncHandler(async (req, res) => {
-    const rows = await db.prepare('SELECT id, title, date, elapsed, updated_at AS "updatedAt" FROM sermons ORDER BY date DESC, id DESC').all();
+    const rows = await db.prepare('SELECT id, title, date, elapsed, updated_at AS "updatedAt" FROM sermons WHERE user_id = ? ORDER BY date DESC, id DESC').all(req.user.id);
     res.json({ ok: true, sermons: rows });
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
-    const title = req.body.title !== undefined ? String(req.body.title) : '';
-    const date = req.body.date !== undefined ? String(req.body.date) : new Date().toISOString().slice(0, 10);
-    const info = await db.prepare('INSERT INTO sermons (title, date, elapsed, created_by) VALUES (?, ?, 0, ?) RETURNING id').run(title, date, req.user.id);
-    res.json({ ok: true, sermon: await getSermonDetail(db, Number(info.lastInsertRowid)) });
+    const title = req.body.title !== undefined ? String(req.body.title).slice(0, 300) : '';
+    const date = req.body.date !== undefined ? String(req.body.date).slice(0, 20) : new Date().toISOString().slice(0, 10);
+    const info = await db.prepare('INSERT INTO sermons (title, date, elapsed, user_id) VALUES (?, ?, 0, ?) RETURNING id').run(title, date, req.user.id);
+    res.json({ ok: true, sermon: await getSermonDetail(db, Number(info.lastInsertRowid), req.user.id) });
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {
-    const detail = await getSermonDetail(db, Number(req.params.id));
+    const id = parseId(req, res);
+    if (id === null) return;
+    const detail = await getSermonDetail(db, id, req.user.id);
     if (!detail) return res.status(404).json({ ok: false, error: 'Sermon not found.' });
     res.json({ ok: true, sermon: detail });
 }));
 
 router.patch('/:id', asyncHandler(async (req, res) => {
-    const id = Number(req.params.id);
-    const cur = await db.prepare('SELECT * FROM sermons WHERE id = ?').get(id);
+    const id = parseId(req, res);
+    if (id === null) return;
+    const cur = await db.prepare('SELECT * FROM sermons WHERE id = ? AND user_id = ?').get(id, req.user.id);
     if (!cur) return res.status(404).json({ ok: false, error: 'Sermon not found.' });
 
     if (req.body.baseUpdatedAt !== undefined && req.body.baseUpdatedAt !== cur.updated_at) {
         return res.status(409).json({ ok: false, error: 'conflict', updatedAt: cur.updated_at });
     }
 
-    const title = req.body.title !== undefined ? String(req.body.title) : cur.title;
-    const date = req.body.date !== undefined ? String(req.body.date) : cur.date;
+    const title = req.body.title !== undefined ? String(req.body.title).slice(0, 300) : cur.title;
+    const date = req.body.date !== undefined ? String(req.body.date).slice(0, 20) : cur.date;
     const elapsed = req.body.elapsed !== undefined ? (Number(req.body.elapsed) || 0) : cur.elapsed;
 
     await db.transaction(async tx => {
-        await tx.prepare("UPDATE sermons SET title = ?, date = ?, elapsed = ?, updated_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id = ?")
-            .run(title, date, elapsed, id);
+        await tx.prepare("UPDATE sermons SET title = ?, date = ?, elapsed = ?, updated_at = to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id = ? AND user_id = ?")
+            .run(title, date, elapsed, id, req.user.id);
 
         if (Array.isArray(req.body.paragraphs)) {
-            await tx.prepare('DELETE FROM paragraphs WHERE sermon_id = ?').run(id); // cascades to scripture_mentions
-            const insertPara = tx.prepare('INSERT INTO paragraphs (sermon_id, seq, t, lang, speaker, text) VALUES (?, ?, ?, ?, ?, ?) RETURNING id');
+            await tx.prepare('DELETE FROM paragraphs WHERE sermon_id = ? AND user_id = ?').run(id, req.user.id); // cascades to scripture_mentions
+            const insertPara = tx.prepare('INSERT INTO paragraphs (sermon_id, user_id, seq, t, lang, speaker, text) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id');
             const insertMention = tx.prepare(
-                'INSERT INTO scripture_mentions (sermon_id, paragraph_id, book_nr, chapter, from_verse, to_verse, whole, check_flag, follow_up, mention_count, at_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                'INSERT INTO scripture_mentions (sermon_id, user_id, paragraph_id, book_nr, chapter, from_verse, to_verse, whole, check_flag, follow_up, mention_count, at_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             for (let idx = 0; idx < req.body.paragraphs.length; idx++) {
                 const p = req.body.paragraphs[idx];
-                const info = await insertPara.run(id, idx, Number(p.t) || 0, String(p.lang || 'en'), p.speaker ? String(p.speaker) : null, String(p.text || ''));
+                const info = await insertPara.run(id, req.user.id, idx, Number(p.t) || 0, String(p.lang || 'en').slice(0, 20), p.speaker ? String(p.speaker).slice(0, 100) : null, String(p.text || '').slice(0, 10000));
                 const paraId = Number(info.lastInsertRowid);
                 for (const r of (p.refs || [])) {
                     await insertMention.run(
-                        id, paraId, Number(r.bookNr), Number(r.chapter),
+                        id, req.user.id, paraId, Number(r.bookNr), Number(r.chapter),
                         r.from == null ? null : Number(r.from), r.to == null ? null : Number(r.to),
                         r.whole ? 1 : 0, r.check ? 1 : 0, r.followUp ? 1 : 0, 1, Number(p.t) || 0
                     );
@@ -97,14 +111,16 @@ router.patch('/:id', asyncHandler(async (req, res) => {
         }
     });
 
-    res.json({ ok: true, sermon: await getSermonDetail(db, id) });
+    res.json({ ok: true, sermon: await getSermonDetail(db, id, req.user.id) });
 }));
 
 router.delete('/:id', asyncHandler(async (req, res) => {
-    const id = Number(req.params.id);
-    const info = await db.prepare('DELETE FROM sermons WHERE id = ?').run(id); // cascades to paragraphs + mentions
+    const id = parseId(req, res);
+    if (id === null) return;
+    const info = await db.prepare('DELETE FROM sermons WHERE id = ? AND user_id = ?').run(id, req.user.id); // cascades to paragraphs + mentions
     if (info.changes === 0) return res.status(404).json({ ok: false, error: 'Sermon not found.' });
     res.json({ ok: true });
 }));
 
 module.exports = router;
+module.exports.getSermonDetail = getSermonDetail;

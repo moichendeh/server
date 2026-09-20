@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: sermon-scribe
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    envVars:
+      # Set automatically by this file - tells the app it is running for real (turns
+      # on secure, HTTPS-only cookies).
+      - key: NODE_ENV
+        value: production
+      # Everything below is left blank on purpose ("sync: false") - Render will ask
+      # you to type each of these in yourself on the dashboard, and will never store
+      # them in this file or in git.
+      - key: JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      # Comma-separated list of email addresses that become Admin, e.g.:
+      # pastor@example.com, helper@example.com
+      - key: ADMIN_EMAILS
+        sync: false

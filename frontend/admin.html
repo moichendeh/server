@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin - Sermon Scribe</title>
+<style>
+:root{
+  --bg:#f5f3ee; --card:#ffffff; --ink:#1d2433; --muted:#667085; --line:#e3ded2;
+  --accent:#1f3a5f; --accent-ink:#ffffff; --danger:#b3261e; --ok:#1d7a4d; --ok-bg:#e6f4ec;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 12px}
+button:hover{border-color:#c9c2b0}
+button.ghost{background:transparent}
+button.danger{color:var(--danger);border-color:#e3b3ae}
+input,select{border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#fff}
+#wrap{max-width:1100px;margin:0 auto;padding:16px}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px}
+.brand{font-weight:700;font-size:20px;color:var(--accent)}
+.brand span{color:#a97a1f}
+header .spacer{flex:1}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{cursor:pointer;color:var(--muted);font-weight:600;white-space:nowrap;user-select:none}
+th:hover{color:var(--ink)}
+th.sorted::after{content:' \25BE'}
+tr.disabled td{color:var(--muted);text-decoration:line-through}
+.tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
+.tag.active{background:var(--ok-bg);color:var(--ok)}
+.tag.disabled{background:#fdecea;color:var(--danger)}
+.actions{display:flex;gap:6px;flex-wrap:wrap}
+.hint{font-size:13px;color:var(--muted)}
+#msg{min-height:1.4em;font-size:14px;color:var(--danger)}
+@media (max-width:700px){
+  table,thead,tbody,tr{display:block}
+  thead{display:none}
+  tr{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;padding:8px}
+  td{border:0;display:flex;justify-content:space-between;gap:10px}
+  td::before{content:attr(data-label);color:var(--muted);font-weight:600}
+}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <div class="brand">Sermon <span>Scribe</span> - Admin</div>
+    <div class="spacer"></div>
+    <button id="backBtn" class="ghost">Back to app</button>
+  </header>
+
+  <div class="card">
+    <p class="hint">Everyone who has an account. This never shows anyone's sermon text - only a count of how many sermons each person has saved.</p>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search name or email" style="min-width:220px">
+      <button id="downloadCsv">Download list as CSV</button>
+      <div class="spacer"></div>
+      <span id="count" class="hint"></span>
+    </div>
+    <div id="msg"></div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th data-sort="name">Name</th>
+            <th data-sort="email">Email</th>
+            <th data-sort="createdAt">Signed up</th>
+            <th data-sort="lastLoginAt">Last login</th>
+            <th data-sort="loginCount">Logins</th>
+            <th data-sort="sermonCount">Sermons</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  let users = [];
+  let sort = 'createdAt', dir = 'desc';
+
+  async function api(method, url) {
+    const res = await fetch(url, { method, credentials: 'same-origin' });
+    const j = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((j && j.error) || ('Request failed (' + res.status + ')'));
+    return j;
+  }
+  function fmt(d) { return d ? new Date(d).toLocaleString() : 'never'; }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+  async function load() {
+    document.getElementById('msg').textContent = '';
+    const params = new URLSearchParams({ search: document.getElementById('search').value.trim(), sort, dir });
+    try {
+      const j = await api('GET', '/api/admin/users?' + params.toString());
+      users = j.users;
+      render();
+    } catch (e) { document.getElementById('msg').textContent = e.message; }
+  }
+  function render() {
+    document.getElementById('count').textContent = users.length + (users.length === 1 ? ' person' : ' people');
+    document.querySelectorAll('th[data-sort]').forEach(th => th.classList.toggle('sorted', th.dataset.sort === sort));
+    document.getElementById('rows').innerHTML = users.map(u => `
+      <tr class="${u.isDisabled ? 'disabled' : ''}">
+        <td data-label="Name">${esc(u.name)}</td>
+        <td data-label="Email">${esc(u.email)}</td>
+        <td data-label="Signed up">${fmt(u.createdAt)}</td>
+        <td data-label="Last login">${fmt(u.lastLoginAt)}</td>
+        <td data-label="Logins">${u.loginCount}</td>
+        <td data-label="Sermons">${u.sermonCount}</td>
+        <td data-label="Status"><span class="tag ${u.isDisabled ? 'disabled' : 'active'}">${u.isDisabled ? 'Disabled' : 'Active'}</span></td>
+        <td data-label="Actions">
+          <div class="actions">
+            ${u.isDisabled
+              ? `<button class="enableBtn" data-id="${u.id}">Enable</button>`
+              : `<button class="disableBtn" data-id="${u.id}">Disable</button>`}
+            <button class="danger deleteBtn" data-id="${u.id}" data-name="${esc(u.name)}">Delete</button>
+          </div>
+        </td>
+      </tr>`).join('') || '<tr><td colspan="8" class="hint">No one found.</td></tr>';
+
+    document.querySelectorAll('.disableBtn').forEach(b => b.addEventListener('click', () => act(b.dataset.id, 'disable')));
+    document.querySelectorAll('.enableBtn').forEach(b => b.addEventListener('click', () => act(b.dataset.id, 'enable')));
+    document.querySelectorAll('.deleteBtn').forEach(b => b.addEventListener('click', () => {
+      if (!confirm('Permanently delete ' + b.dataset.name + ' and every sermon they saved? This cannot be undone.')) return;
+      act(b.dataset.id, 'delete');
+    }));
+  }
+  async function act(id, kind) {
+    document.getElementById('msg').textContent = '';
+    try {
+      if (kind === 'disable') await api('POST', '/api/admin/users/' + id + '/disable');
+      else if (kind === 'enable') await api('POST', '/api/admin/users/' + id + '/enable');
+      else await api('DELETE', '/api/admin/users/' + id);
+      await load();
+    } catch (e) { document.getElementById('msg').textContent = e.message; }
+  }
+  function downloadCsv() {
+    const cols = ['name', 'email', 'createdAt', 'lastLoginAt', 'loginCount', 'sermonCount', 'isDisabled'];
+    const header = ['Name', 'Email', 'Signed up', 'Last login', 'Logins', 'Sermons', 'Status'];
+    const lines = [header.join(',')].concat(users.map(u => cols.map(c => {
+      const v = c === 'isDisabled' ? (u.isDisabled ? 'Disabled' : 'Active') : u[c];
+      return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    }).join(',')));
+    const blob = new Blob([lines.join('\r\n')], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'sermon-scribe-users.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  document.getElementById('backBtn').addEventListener('click', () => { location.href = '/'; });
+  document.getElementById('search').addEventListener('input', () => { clearTimeout(window.__t); window.__t = setTimeout(load, 250); });
+  document.getElementById('downloadCsv').addEventListener('click', downloadCsv);
+  document.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
+    if (sort === th.dataset.sort) dir = dir === 'asc' ? 'desc' : 'asc';
+    else { sort = th.dataset.sort; dir = 'asc'; }
+    load();
+  }));
+
+  (async function init() {
+    try {
+      const me = await api('GET', '/api/auth/me');
+      if (me.user.role !== 'admin') { location.href = '/'; return; }
+    } catch (e) { location.href = '/'; return; }
+    load();
+  })();
+})();
+</script>
+</body>
+</html>

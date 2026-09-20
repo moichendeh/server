@@ -14,12 +14,18 @@ exactly as shown, in a terminal, from this folder.
 - **backend/** - a Node.js program (Express) that the frontend talks to over normal
   web requests, and a live "what's on the projector" channel (WebSocket) that keeps
   every open projector screen in sync the instant something is projected.
-- **the database** - PostgreSQL. It stores every sermon, its paragraphs, which
-  scriptures were mentioned where, a cache of downloaded Bible text, your settings,
+- **the database** - PostgreSQL. It stores every user's account, sermons, paragraphs,
+  which scriptures were mentioned where, a cache of downloaded Bible text, settings,
   the list of logins, and who is currently logged in.
 
 Picture it as: **Chrome (frontend) → talks to → the backend program → reads/writes →
 the database.** The frontend never touches the database directly.
+
+**This app is multi-tenant**: anyone can create their own account, and every person
+only ever sees their own sermons, notes, settings, and projector link. The server
+checks who is logged in on every single request and only ever reads or writes that
+person's own rows - never anyone else's, even if someone tries to guess another
+person's sermon id in the address bar.
 
 For the live projector specifically: **any screen that opens `/projector` → connects
 to → the backend's live channel.** Whoever projects a verse (from the notes page, or
@@ -51,8 +57,9 @@ npm install        (only needed the first time, or after pulling updates)
 npm start
 ```
 
-Then open **http://localhost:3000** in Chrome. The first account you create there
-becomes the Admin.
+Then open **http://localhost:3000** in Chrome and create an account (name, email,
+10+ character password). Anyone can sign up - see **Accounts and the Admin page**
+below for how someone becomes an Admin.
 
 To reach it from another device on the same Wi-Fi (like your phone), find this
 computer's network address and open `http://<that address>:3000` instead.
@@ -83,26 +90,64 @@ backups - check their dashboard.
 - `PGSSL=off` - only needed for a **local** Postgres install, which doesn't speak
   encrypted connections by default. Leave this line out entirely for a hosted
   database (Neon/Supabase) - those require encryption, which is the normal setting.
+- `ADMIN_EMAILS` - a comma-separated list of email addresses that should be Admins,
+  e.g. `pastor@example.com,office@example.com`. See below.
 
 If you ever need to recreate `.env`, copy `backend/.env.example` to `backend/.env`
 and fill in your own values.
 
-## Roles
+## Accounts and the Admin page
 
-- **Admin** - full access, and can create accounts for teammates (Team card in the app).
-- **Note-taker** - can write notes and project scripture, cannot manage accounts.
-- **Media** - only ever sees the `/projector` page, never the sermon notes. Logging in
-  takes them straight to a screen with just an "Open the projector page" button.
+Anyone can create their own account (name, email, a 10+ character password, and
+ticking a box to accept the [privacy notice](frontend/privacy.html)). There are only
+two roles:
 
-The very first account ever created on a fresh database becomes Admin automatically.
-After that, anyone using "Create account" on the login screen becomes a Note-taker by
-default - only a logged-in Admin can hand out the Admin or Media role, from the Team card.
+- **user** - the normal role. Everyone gets this by default. A user can only ever see
+  and manage their own sermons, settings, and projector code.
+- **admin** - can additionally open **`/admin`** in the app (a link appears in the
+  header once logged in), which lists everyone who has ever signed up: name, email,
+  sign-up date, last login, how many times they've logged in, how many sermons they
+  have (a **count only** - an Admin can never read anyone's sermon text), and whether
+  the account is enabled or disabled. From there an Admin can search, sort, download
+  the list as a CSV file, disable/enable an account (a disabled account is instantly
+  logged out and can't log back in), or permanently delete an account and everything
+  in it (with a confirmation, since this cannot be undone).
+
+**Who becomes an Admin is controlled entirely by you**, through the `ADMIN_EMAILS`
+environment variable - never by "whoever signs up first". Any email address listed
+there becomes (or stays) an Admin the moment that person registers or logs in; every
+other address stays a normal user. To change who's an Admin, edit `ADMIN_EMAILS` and
+have that person log out and back in (or just wait for their next login).
+
+If you had sermons in the database from before accounts existed, they aren't deleted -
+they're simply invisible to everyone until an Admin (per `ADMIN_EMAILS`) logs in for
+the first time, at which point that old data is automatically handed to them.
+
+### Seeing the same user list directly in Neon
+
+If you'd rather look at the Neon dashboard than open `/admin`, paste this into the
+Neon SQL Editor:
+
+```sql
+SELECT u.name, u.email, u.role, u.created_at AS signed_up,
+       u.last_login_at, u.login_count, u.is_disabled,
+       COUNT(s.id) AS sermon_count
+FROM users u
+LEFT JOIN sermons s ON s.user_id = u.id
+GROUP BY u.id
+ORDER BY u.created_at DESC;
+```
 
 ## Using the live projector (Stage B)
 
+Each account has its **own** projector - what one person projects is only ever seen on
+their own projector link, never on anyone else's, even if two people happen to be
+using the app at the same time.
+
 `/projector` needs **no login at all** - it opens straight to whatever is currently
-projected (or a plain "Waiting for the projector link" screen if nothing has been
-shared with it yet). What it's allowed to *do* depends on how it got there:
+projected on the one account it belongs to (or a plain "Waiting for the projector
+link" screen if nothing has been shared with it yet). What it's allowed to *do*
+depends on how it got there:
 
 - **Sharing it with the media team**: on the notes page, under "Projector settings",
   there's a **projector link** with a **Copy link** button. Share that link (not the
@@ -114,10 +159,10 @@ shared with it yet). What it's allowed to *do* depends on how it got there:
   Clicking **"New link"** immediately invalidates the old one (anyone still on it
   stops receiving updates) - use this if a link was shared too widely or a device is
   no longer needed.
-- **Opening it on your own logged-in browser** (e.g. "Open projector window", or a
-  Media-role account) - the same page, but because it's logged in, it also gets
-  Next/Previous/Clear buttons to control what's projected, kept in sync with every
-  other connected screen (the notes page's "On the screen now" panel included).
+- **Opening it on your own logged-in browser** (e.g. "Open projector window") - the
+  same page, but because it's logged in, it also gets Next/Previous/Clear buttons to
+  control what's projected, kept in sync with every other connected screen (the notes
+  page's "On the screen now" panel included).
 - A small pill in the corner says **Connected**, or **Disconnected - retrying...** if
   the network drops - it reconnects on its own once the network is back, no need to
   reload the page.
@@ -133,46 +178,88 @@ cd backend
 npm test
 ```
 
-Runs two self-contained test suites (Node's built-in test runner) against a throwaway
-database - never your real data:
+Runs six self-contained test suites (Node's built-in test runner), each against its
+own throwaway database - never your real data:
 
-- **test/api.test.js** - logins, roles, saving/loading sermons, the conflict check for
-  two people saving at once, settings, and the "import old sermons" feature.
-- **test/live.test.js** - the live projector channel: logged-in devices or a valid
-  screen code can connect, projecting reaches every other connected screen, a screen
-  that joins late still sees whatever is currently live, paging Next/Previous/Clear
-  keeps everyone in sync, going past the last page is refused, a code-only connection
-  can watch but its own control messages are silently ignored by the server (not just
-  hidden in the UI), a stale/invalid code is rejected, and creating a new code revokes
-  the old one.
+- **test/api.test.js** - registration/login rules, admin-by-`ADMIN_EMAILS`, password
+  hashing, CSRF protection, login tracking, disabling an account, saving/loading
+  sermons, the conflict check for two people saving at once, settings, and "import old
+  sermons".
+- **test/isolation.test.js** - the core promise of this update, proven with two real
+  accounts: person B can never list, open, edit, delete, or download person A's
+  sermons - not even by guessing ids, negative numbers, or SQL-injection-style ids -
+  always getting a plain 404, and settings/screen-codes are separate per person too.
+- **test/admin.test.js** - only Admins can reach `/api/admin`, the list never contains
+  sermon content, search works, and disable/enable/delete behave correctly (including
+  that an Admin can't disable or delete themselves through it).
+- **test/privacy.test.js** - registration requires accepting the privacy notice,
+  "Download my data" returns your own data only, and "Delete my account" really
+  removes everything and logs you out.
+- **test/live.test.js** - the live projector channel, now per-user: logged-in devices
+  or a valid screen code can connect, projecting reaches every other connection in
+  *that same person's* room and never a different person's room, a screen that joins
+  late still sees whatever is currently live, paging Next/Previous/Clear keeps
+  everyone in sync, a code-only connection can watch but its own control messages are
+  silently ignored by the server (not just hidden in the UI), a stale/invalid code is
+  rejected, and creating a new code revokes the old one.
+- **test/rateLimit.test.js** - proves repeated login attempts really do get blocked
+  (429) after enough tries.
 
-By default these run against `sermon_scribe_test` / `sermon_scribe_test_live` on a
-local Postgres. Point them elsewhere with `DATABASE_URL_TEST` / `DATABASE_URL_TEST_LIVE`.
+By default these run against local Postgres databases named `sermon_scribe_test`,
+`sermon_scribe_test_isolation`, `sermon_scribe_test_admin`, `sermon_scribe_test_privacy`,
+`sermon_scribe_test_live`, and `sermon_scribe_test_ratelimit`. Point any of them
+elsewhere with `DATABASE_URL_TEST`, `DATABASE_URL_TEST_ISOLATION`,
+`DATABASE_URL_TEST_ADMIN`, `DATABASE_URL_TEST_PRIVACY`, `DATABASE_URL_TEST_LIVE`, or
+`DATABASE_URL_TEST_RATELIMIT`.
 
 ## Security notes
 
 - Passwords are never stored as plain text - they are hashed with bcrypt before being saved.
-- All API input is checked (email format, password length, valid roles, etc.) before
-  it touches the database.
+- Every table holding a person's data (sermons, paragraphs, scripture mentions,
+  settings, screen codes) has a `user_id`, and every single query filters by the
+  logged-in person's own id - the server never trusts an id sent by the browser.
+- All API input is checked (name, email format, password length, privacy acceptance,
+  etc.) before it touches the database.
 - Every database query uses parameter placeholders (never builds SQL out of raw
   text), which is what prevents SQL injection.
+- Login attempts are rate-limited, so a script trying many passwords in a row gets
+  blocked (429) after a handful of tries.
+- Cross-site request forgery (CSRF) is blocked: a request that changes anything is
+  only accepted if it came from this app's own page, not from some other website
+  tricking your browser into submitting it.
 - No secret key or password is ever sent to the browser or written into `frontend/index.html`.
-- Logins use a signed cookie plus a `sessions` row in the database, so "Log out"
-  really ends that login (not just hides the cookie).
-- The live projector channel (`/ws`) requires the same login cookie as everything
-  else - a stranger can't connect to it just by guessing the URL.
+- Logins use a signed, `httpOnly`/`secure`/`sameSite` cookie plus a `sessions` row in
+  the database, so "Log out" (or an Admin disabling an account) really ends that
+  login immediately - not just hides the cookie.
+- The live projector channel (`/ws`) requires either the same login cookie as
+  everything else, or a valid per-person screen code - and a screen-code-only
+  connection can only ever *watch*, never control anything, even if someone opens
+  developer tools and sends control messages directly; the server itself refuses them.
 
 ### What still needs to change before this goes on the open internet
 
-1. **HTTPS.** Right now it's plain HTTP. Logging in over plain HTTP on the open
-   internet would send the password unencrypted. A real hosting platform (see below)
-   normally provides this for you automatically.
-2. **Real hosting**, so the app stays online without your laptop running - a platform
-   like Render, Fly.io or Railway. This also solves HTTPS in most cases.
-3. **Rate limiting on login**, so a script trying thousands of passwords can't hammer
-   the server.
-4. A **backup schedule** for the database that runs on its own, not just remembering
-   to run `pg_dump`.
+1. **HTTPS.** A real hosting platform (Render, see below) provides this automatically -
+   just make sure you're using the `https://` address it gives you, not `http://`.
+2. A **backup schedule** for the database that runs on its own, not just remembering
+   to run `pg_dump`. Neon keeps its own automatic backups too - check its dashboard.
+
+## Deploying to Render (with a Neon database)
+
+`render.yaml` at the top of this repository describes the whole backend as a Render
+"Blueprint". In the Render dashboard, choose **New → Blueprint** and point it at this
+repository; Render reads `render.yaml` and sets most things up automatically. You will
+be asked to fill in three values by hand (they're deliberately left blank in the file
+so they're never committed to git):
+
+- `JWT_SECRET` - any long random string (e.g. generate one with a password manager).
+- `DATABASE_URL` - the connection string from your Neon project (Neon dashboard →
+  Connection Details). It should end in `?sslmode=require`.
+- `ADMIN_EMAILS` - the email address(es) that should be Admins, comma-separated, e.g.
+  `pastor@example.com,office@example.com`. See **Accounts and the Admin page** above.
+
+`NODE_ENV=production` is already set for you in `render.yaml` - this is what turns on
+`secure` cookies (HTTPS-only), which only works correctly once the app is actually
+served over HTTPS, which Render does automatically.
 
 ## Known limitations (being upfront about the trade-offs made)
 
@@ -187,3 +274,11 @@ local Postgres. Point them elsewhere with `DATABASE_URL_TEST` / `DATABASE_URL_TE
   already has, but can't fetch a brand new one on its own.
 - Logging in is via a cookie tied to one browser; there is no "remember me on this
   device forever" beyond the 30-day login length.
+- Upgrading a database that already had sermons in it from before accounts existed
+  drops the old, single shared "settings" row (it only ever held small display
+  preferences, never sermon content) so it can be recreated per-person. Your sermons
+  themselves are never touched, and are handed to the Admin account automatically -
+  see **Accounts and the Admin page**.
+- Everyone's own settings, projector code, and login history stay private to them; an
+  Admin can see *that* someone has an account and how many sermons they have, but
+  never the sermon content itself.

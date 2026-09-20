@@ -125,25 +125,20 @@ body.proj #app{display:none}
 <div id="loginScreen" class="loginWrap">
   <form id="loginForm" class="loginCard">
     <div class="brand">Sermon <span>Scribe</span></div>
-    <p class="hint">Log in to your church's account. The very first account anyone creates becomes the Admin.</p>
+    <p class="hint">Log in, or create your own account. Everyone's sermons are private to their own account - nobody else, including other users, can see them.</p>
+    <label>Name (only needed to create an account)<input id="loginName" autocomplete="name"></label>
     <label>Email<input id="loginEmail" type="email" autocomplete="username" required></label>
-    <label>Password<input id="loginPassword" type="password" autocomplete="current-password" required minlength="8"></label>
+    <label>Password (10+ characters)<input id="loginPassword" type="password" autocomplete="current-password" required minlength="10"></label>
+    <label class="inl" style="font-size:13px;color:var(--muted);align-items:flex-start">
+      <input type="checkbox" id="privacyCheck" style="margin-top:3px">
+      <span>I have read and accept the <a href="/privacy" target="_blank" rel="noopener">privacy notice</a> (only needed to create an account)</span>
+    </label>
     <div id="loginError" class="err" style="display:none"></div>
     <div class="btnrow">
       <button type="submit" class="primary">Log in</button>
       <button type="button" id="registerBtn">Create account</button>
     </div>
-    <p class="hint">"Create account" makes a new login. If your church has no account yet, this is how you become Admin.</p>
   </form>
-</div>
-
-<div id="mediaPlaceholder" class="loginWrap" style="display:none">
-  <div class="loginCard">
-    <div class="brand">Sermon <span>Scribe</span></div>
-    <p>You are logged in as <b>Media</b>.</p>
-    <button id="mediaOpenProj" class="primary" style="margin-bottom:10px">Open the projector page</button>
-    <button id="mediaLogout" class="small">Log out</button>
-  </div>
 </div>
 
 <div id="app" style="display:none">
@@ -155,6 +150,7 @@ body.proj #app{display:none}
     <button id="newBtn" class="small">New sermon</button>
     <button id="delBtn" class="small ghost">Delete</button>
     <span id="userBadge" class="pill"></span>
+    <button id="adminLink" class="small" style="display:none">Admin panel</button>
     <button id="logoutBtn" class="small ghost">Log out</button>
   </header>
 
@@ -278,19 +274,13 @@ body.proj #app{display:none}
         </div>
       </section>
 
-      <section class="card" id="teamCard" style="display:none">
-        <h2>Team (Admin only)</h2>
-        <p class="hint">Create a login for someone else. They will use this email and password to log in themselves.</p>
-        <form class="row" id="teamForm" style="flex-wrap:wrap">
-          <input id="teamEmail" type="email" placeholder="Email" required style="flex:1 1 160px">
-          <input id="teamPassword" type="password" placeholder="Password (8+ characters)" minlength="8" required style="flex:1 1 160px">
-          <select id="teamRole">
-            <option value="notetaker">Note-taker</option>
-            <option value="media">Media</option>
-            <option value="admin">Admin</option>
-          </select>
-          <button type="submit" class="primary">Create</button>
-        </form>
+      <section class="card">
+        <h2>My account</h2>
+        <p class="hint">See our <a href="/privacy" target="_blank" rel="noopener">privacy notice</a> for what is stored and why.</p>
+        <div class="btnrow">
+          <button id="downloadDataBtn" class="small">Download my data</button>
+          <button id="deleteAccountBtn" class="small ghost">Delete my account</button>
+        </div>
       </section>
     </aside>
   </main>
@@ -815,9 +805,9 @@ async function doLogin(email, password) {
   const j = await api('POST', '/api/auth/login', { email, password });
   S.user = j.user;
 }
-async function doRegister(email, password, role) {
-  const j = await api('POST', '/api/auth/register', { email, password, role });
-  if (!S.user) S.user = j.user; // an Admin creating a teammate must stay logged in as themselves
+async function doRegister(name, email, password, privacyAccepted) {
+  const j = await api('POST', '/api/auth/register', { name, email, password, privacyAccepted });
+  S.user = j.user;
   return j.user;
 }
 async function doLogout() {
@@ -1426,16 +1416,19 @@ function importBackup(file) {
 /* ------------------------------------------------------------------ */
 async function startApp() {
   $('loginScreen').style.display = 'none';
-  if (S.user.role === 'media') {
-    $('mediaPlaceholder').style.display = '';
-    $('mediaLogout').addEventListener('click', async () => { await doLogout(); location.reload(); });
-    $('mediaOpenProj').addEventListener('click', () => { location.href = '/projector'; });
-    return;
-  }
   $('app').style.display = '';
-  $('userBadge').textContent = S.user.email + ' (' + S.user.role + ')';
+  $('userBadge').textContent = S.user.name ? (S.user.name + ' (' + S.user.email + ')') : S.user.email;
   $('logoutBtn').addEventListener('click', async () => { await doLogout(); location.reload(); });
-  if (S.user.role === 'admin') $('teamCard').style.display = '';
+  if (S.user.role === 'admin') {
+    $('adminLink').style.display = '';
+    $('adminLink').addEventListener('click', () => { location.href = '/admin'; });
+  }
+  $('downloadDataBtn').addEventListener('click', () => { location.href = '/api/me/export'; });
+  $('deleteAccountBtn').addEventListener('click', async () => {
+    if (!confirm('This permanently deletes your account and every sermon you have saved. This cannot be undone. Continue?')) return;
+    try { await api('DELETE', '/api/me'); toast('Your account has been deleted.'); location.href = '/'; }
+    catch (e) { toast('Could not delete your account: ' + e.message); }
+  });
   connectLiveWs();
   loadScreenCode();
   $('copyProjLinkBtn').addEventListener('click', async () => {
@@ -1530,15 +1523,6 @@ async function startApp() {
   $('imBackup').addEventListener('click', () => $('imFile').click());
   $('imFile').addEventListener('change', e => { if (e.target.files[0]) importBackup(e.target.files[0]); e.target.value = ''; });
   $('importOldBtn').addEventListener('click', importOldBrowserSermons);
-  $('teamForm').addEventListener('submit', async e => {
-    e.preventDefault();
-    const email = $('teamEmail').value.trim(), password = $('teamPassword').value, role = $('teamRole').value;
-    try {
-      await doRegister(email, password, role);
-      toast('Account created for ' + email + ' (' + role + ').');
-      $('teamForm').reset();
-    } catch (err) { toast('Could not create that account: ' + err.message); }
-  });
 
   document.addEventListener('keydown', e => {
     const a = document.activeElement;
@@ -1572,10 +1556,13 @@ async function boot() {
   });
   $('registerBtn').addEventListener('click', async () => {
     $('loginError').style.display = 'none';
-    const email = $('loginEmail').value.trim(), password = $('loginPassword').value;
-    if (!email || password.length < 8) { $('loginError').textContent = 'Enter an email and an 8+ character password first.'; $('loginError').style.display = ''; return; }
+    const name = $('loginName').value.trim(), email = $('loginEmail').value.trim(), password = $('loginPassword').value;
+    const privacyAccepted = $('privacyCheck').checked;
+    if (!name) { $('loginError').textContent = 'Enter your name first.'; $('loginError').style.display = ''; return; }
+    if (!email || password.length < 10) { $('loginError').textContent = 'Enter an email and a 10+ character password first.'; $('loginError').style.display = ''; return; }
+    if (!privacyAccepted) { $('loginError').textContent = 'Please accept the privacy notice to create an account.'; $('loginError').style.display = ''; return; }
     try {
-      await doRegister(email, password);
+      await doRegister(name, email, password, privacyAccepted);
       await startApp();
     } catch (err) { $('loginError').textContent = err.message; $('loginError').style.display = ''; }
   });

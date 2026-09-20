@@ -65,7 +65,9 @@ db.transaction = async (fn) => {
 
 db.close = () => pool.end();
 
+const migrate = fs.readFileSync(path.join(__dirname, 'migrate.sql'), 'utf8');
 const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-db.ready = pool.query(schema).catch(e => { console.error('Failed to set up database tables:', e.message); process.exit(1); });
+db.ready = pool.query(migrate).then(() => pool.query(schema))
+    .catch(e => { console.error('Failed to set up database tables:', e.message); process.exit(1); });
 
 module.exports = db;
