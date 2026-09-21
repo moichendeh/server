@@ -61,6 +61,18 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
+-- paragraphs: AI correction/translation columns, added for the AI text features.
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'paragraphs') THEN
+        ALTER TABLE paragraphs ADD COLUMN IF NOT EXISTS corrected_text TEXT;
+        ALTER TABLE paragraphs ADD COLUMN IF NOT EXISTS translated_text TEXT;
+        ALTER TABLE paragraphs ADD COLUMN IF NOT EXISTS translated_lang TEXT;
+    END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
 -- settings: the old table was one shared row per key for the whole (single) church.
 -- That shape cannot become per-user (a primary key can't have a NULL column), and the
 -- values in it were only ever small display preferences, never sermon content - so
