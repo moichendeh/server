@@ -85,6 +85,7 @@ body.proj{background:#000;color:#fff;overflow:hidden}
 #proj{display:none}
 body.proj #proj{display:flex}
 body.proj #app{display:none}
+body.proj #loginScreen{display:none}
 #proj{position:fixed;inset:0;flex-direction:column;justify-content:center;align-items:center;padding:4vh 6vw;text-align:center;font-family:Georgia,"Times New Roman",serif}
 #projRef{flex:0 0 auto;color:#d9b45a;font-size:3.4vh;margin-bottom:2vh;letter-spacing:.03em}
 #projCols{width:100%;flex:1 1 auto;display:flex;gap:4vw;overflow:hidden;min-height:0}
@@ -1453,8 +1454,16 @@ async function startApp() {
 
   const list = await api('GET', '/api/sermons');
   S.sermons = list.sermons;
-  if (!S.sermons.length) await createAndOpenSermon();
-  else await openSermon(S.sermons[0].id);
+  if (!S.sermons.length) {
+    await createAndOpenSermon();
+  } else {
+    await openSermon(S.sermons[0].id);
+    // Logging back in should feel like a fresh start, not a resume of whatever was
+    // last open - unless that last sermon was never actually touched (e.g. a plain
+    // page reload mid-session), in which case reusing it avoids piling up empty rows.
+    const untouched = !S.current.title && !S.current.paras.length && !S.current.elapsed;
+    if (!untouched) await createAndOpenSermon();
+  }
 
   Object.entries(TRANSLATIONS).forEach(([k, v]) => $('trSel').append(h('option', { value: k }, v.label)));
   $('trSel').value = S.tr;
