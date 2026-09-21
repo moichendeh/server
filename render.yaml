@@ -26,3 +26,27 @@ services:
       # translations. Leave unset and those translations simply show as unavailable.
       - key: API_BIBLE_KEY
         sync: false
+      # Your Anthropic API key (console.anthropic.com) - enables AI spelling/grammar
+      # correction and translation. Leave unset and those features just report as
+      # turned off; nothing else in the app is affected.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Which Claude model the AI features call - kept as a plain value (not a
+      # secret) so you can change it without touching any code. claude-haiku-4-5 is
+      # Anthropic's current small/fast/low-cost model as of when this was written;
+      # check https://docs.claude.com/en/docs/about-claude/models for the current one.
+      - key: ANTHROPIC_MODEL
+        value: claude-haiku-4-5
+      # Site-wide kill switch for the AI features, independent of the admin-panel
+      # toggle (that one takes effect instantly; this one needs a redeploy, but
+      # works even if the database is unreachable). Set to "false" to force AI off.
+      - key: AI_ENABLED
+        value: "true"
+      # Daily per-user caps that protect you from a runaway bill - see "Cost and abuse
+      # protection" in the README. Both apply at once; either one being reached blocks
+      # further AI requests for that user until the next day, with their notes still
+      # saved as plain text.
+      - key: AI_DAILY_CHAR_LIMIT
+        value: "150000"
+      - key: AI_DAILY_REQUEST_LIMIT
+        value: "1000"

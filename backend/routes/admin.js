@@ -1,18 +1,22 @@
 const express = require('express');
+const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../db');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { isAiEnabled, aiEnvConfigured } = require('../lib/aiConfig');
 
 const router = express.Router();
 router.use(requireAuth, requireRole('admin'));
 
 const SORT_COLUMNS = {
     name: 'u.name', email: 'u.email', createdAt: 'u.created_at',
-    lastLoginAt: 'u.last_login_at', loginCount: 'u.login_count', sermonCount: 'sermon_count'
+    lastLoginAt: 'u.last_login_at', loginCount: 'u.login_count', sermonCount: 'sermon_count',
+    aiRequests: '"aiRequests"'
 };
 
 // The user list never includes sermon TEXT, only a count - admins can see who is
-// using the app and moderate accounts, never read anyone's sermons.
+// using the app and moderate accounts, never read anyone's sermons. AI usage is
+// counts only too (requests/characters), never the text that was sent.
 router.get('/users', asyncHandler(async (req, res) => {
     const search = String(req.query.search || '').trim();
     const sortCol = SORT_COLUMNS[req.query.sort] || 'u.created_at';
@@ -21,15 +25,55 @@ router.get('/users', asyncHandler(async (req, res) => {
     const rows = await db.prepare(`
         SELECT u.id, u.name, u.email, u.role, u.is_disabled AS "isDisabled",
                u.created_at AS "createdAt", u.last_login_at AS "lastLoginAt", u.login_count AS "loginCount",
-               COUNT(s.id) AS "sermonCount"
+               COUNT(DISTINCT s.id) AS "sermonCount",
+               COALESCE(SUM(a.requests), 0) AS "aiRequests",
+               COALESCE(SUM(a.chars_in + a.chars_out), 0) AS "aiChars"
         FROM users u
         LEFT JOIN sermons s ON s.user_id = u.id
+        LEFT JOIN ai_usage a ON a.user_id = u.id
         WHERE u.name ILIKE ? OR u.email ILIKE ?
         GROUP BY u.id
         ORDER BY ${sortCol} ${dir}
     `).all('%' + search + '%', '%' + search + '%');
 
-    res.json({ ok: true, users: rows.map(r => ({ ...r, sermonCount: Number(r.sermonCount) })) });
+    res.json({ ok: true, users: rows.map(r => ({ ...r, sermonCount: Number(r.sermonCount), aiRequests: Number(r.aiRequests), aiChars: Number(r.aiChars) })) });
+}));
+
+// The AI on/off switch has two layers: ANTHROPIC_API_KEY/AI_ENABLED (env vars, need a
+// redeploy to change) and this admin-panel toggle (app_config row, takes effect on the
+// very next request - no redeploy needed, for "turn it off right now").
+router.get('/ai-config', asyncHandler(async (req, res) => {
+    const row = await db.prepare('SELECT value FROM app_config WHERE key = ?').get('ai_enabled');
+    res.json({ ok: true, envConfigured: aiEnvConfigured(), adminEnabled: !row || row.value !== 'false', effectiveEnabled: await isAiEnabled() });
+}));
+router.post('/ai-config', asyncHandler(async (req, res) => {
+    const enabled = !!req.body.enabled;
+    await db.prepare(
+        `INSERT INTO app_config (key, value) VALUES ('ai_enabled', ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`
+    ).run(String(enabled));
+    res.json({ ok: true, adminEnabled: enabled, effectiveEnabled: await isAiEnabled() });
+}));
+
+// A real (tiny, fixed, non-user-data) call to Claude, so an admin can tell "the key
+// is missing" apart from "the key is set but wrong/out of credit/wrong model name" -
+// the per-request error a normal user sees is deliberately vague (never alarming
+// mid-service), so this is the only place that surfaces the real reason.
+router.post('/ai-test', asyncHandler(async (req, res) => {
+    if (!process.env.ANTHROPIC_API_KEY) return res.json({ ok: true, success: false, reason: 'ANTHROPIC_API_KEY is not set on this server.' });
+    const model = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
+    try {
+        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        await anthropic.messages.create({ model, max_tokens: 16, messages: [{ role: 'user', content: 'Reply with just the word: ok' }] });
+        res.json({ ok: true, success: true, model });
+    } catch (e) {
+        let reason = e.message || e.name || 'The request failed for an unknown reason.';
+        if (e instanceof Anthropic.AuthenticationError) reason = 'The API key was rejected as invalid or revoked.';
+        else if (e instanceof Anthropic.PermissionDeniedError) reason = 'The key is valid but not permitted here - often means no billing/payment method set up on the Anthropic account yet.';
+        else if (e instanceof Anthropic.NotFoundError) reason = 'Model "' + model + '" was not found or is not available to this key - check ANTHROPIC_MODEL.';
+        else if (e instanceof Anthropic.RateLimitError) reason = 'Rate limited by Anthropic - wait a moment and try again.';
+        res.json({ ok: true, success: false, reason, model, status: e.status || null });
+    }
 }));
 
 router.post('/users/:id/disable', asyncHandler(async (req, res) => {

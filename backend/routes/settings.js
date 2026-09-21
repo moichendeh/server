@@ -13,7 +13,11 @@ const DEFAULTS = {
     triggerPhrases: ['project', 'project it', 'put it on the screen', 'show it', 'media', 'projizieren', 'bitte einblenden', 'auf den bildschirm'],
     projLayout: 'en',
     projTrEn: 'kjv',
-    projTrDe: 'elb1905'
+    projTrDe: 'elb1905',
+    // Opt-in, not opt-out - sermon text is only ever sent to the AI provider once a
+    // user has explicitly agreed to that in their own settings (see the privacy page).
+    aiEnabled: false,
+    translateTo: 'none'
 };
 
 async function readSettings(userId) {

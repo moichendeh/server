@@ -49,6 +49,10 @@ main{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr);gap:16
 .ptext{font-size:17px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 .prefs{grid-column:2;display:flex;flex-wrap:wrap;gap:6px}
 .chip{border:1px solid #e0cf9f;background:var(--gold-bg);color:#6b4c0d;border-radius:999px;padding:1px 10px;font-size:13px;cursor:pointer}
+.aiToggle{display:inline-flex;gap:4px;margin-left:8px;vertical-align:middle}
+.aiToggle button{padding:0 8px;font-size:11px;line-height:1.6}
+.ptrans{grid-column:2;font-size:14px;color:var(--muted);font-style:italic;margin:2px 0 4px;line-height:1.5}
+.ptrans .tag{display:inline-block;font-size:11px;font-style:normal;color:#6b4c0d;background:#f1e2b8;border-radius:4px;padding:0 6px;margin-right:6px}
 #interim{color:var(--muted);font-style:italic;min-height:1.5em;padding:8px 0 0 74px}
 .empty{color:var(--muted);padding:18px 0}
 form.row{display:flex;gap:8px;margin-top:10px}
@@ -168,7 +172,7 @@ body.proj #loginScreen{display:none}
       <li>Click <b>Open projector window</b>, drag that window to the projector screen, and press <kbd>F</kbd> in it for full screen.</li>
       <li>You can correct any text by clicking on it. Everything saves automatically in this browser. Export to Word, text or PDF when the service ends.</li>
     </ol>
-    <p class="hint">Twi: browsers cannot transcribe Twi automatically. In Twi mode, type short notes in the box under the transcript (press Enter). Bible references you type or say in English or German are still detected.</p>
+    <p class="hint">Twi and Krio: browsers cannot transcribe these automatically. In Twi/Krio mode, type short notes in the box under the transcript (press Enter). Bible references you type or say in English or German are still detected. AI correction and translation (if turned on in "My account") work on typed Twi/Krio notes too, though those two are always labelled "draft translation, please review" since the AI is less reliable in them.</p>
   </details>
 
   <section class="controls">
@@ -177,9 +181,16 @@ body.proj #loginScreen{display:none}
       <button data-lang="en" class="active">English</button>
       <button data-lang="de">Deutsch</button>
       <button data-lang="tw">Twi</button>
+      <button data-lang="kri">Krio</button>
     </div>
     <label class="inl">Accent <select id="accentSel"></select></label>
     <label class="inl">Bible <select id="trSel"></select></label>
+    <label class="inl">Translate to <select id="translateToSel">
+      <option value="none">None</option>
+      <option value="en">English</option>
+      <option value="de">German</option>
+      <option value="kri">Krio</option>
+    </select></label>
     <button id="openProj">Open projector window</button>
     <span id="status" class="pill">Idle</span>
     <span id="clock" class="pill">00:00</span>
@@ -287,7 +298,19 @@ body.proj #loginScreen{display:none}
 
       <section class="card">
         <h2>Export</h2>
-        <div class="btnrow">
+        <div class="setting">
+          <label class="inl">Text to include
+            <select id="exportModeSel">
+              <option value="original">Original</option>
+              <option value="corrected">Corrected (falls back to original)</option>
+              <option value="both">Original + Corrected</option>
+              <option value="translation">Translation only</option>
+              <option value="origTrans">Original + Translation</option>
+              <option value="side">Side by side (Original | Translation)</option>
+            </select>
+          </label>
+        </div>
+        <div class="btnrow" style="margin-top:8px">
           <button id="exWord" class="small">Word (.doc)</button>
           <button id="exTxt" class="small">Text (.txt)</button>
           <button id="exPdf" class="small">Print / PDF</button>
@@ -301,6 +324,10 @@ body.proj #loginScreen{display:none}
       <section class="card">
         <h2>My account</h2>
         <p class="hint">See our <a href="/privacy" target="_blank" rel="noopener">privacy notice</a> for what is stored and why.</p>
+        <div class="setting">
+          <label class="inl"><input type="checkbox" id="aiOptIn"> Use AI correction and translation</label>
+        </div>
+        <p class="hint">When on, finished paragraphs are sent to our AI provider (Anthropic) to fix spelling/grammar and, if you choose a "Translate to" language above, to translate them. Your original words are always kept too - see the privacy notice for details.</p>
         <div class="btnrow">
           <button id="downloadDataBtn" class="small">Download my data</button>
           <button id="deleteAccountBtn" class="small ghost">Delete my account</button>
@@ -799,7 +826,8 @@ const S = {
   suggestions: [], live: null, lastRef: null, lastFinalAt: 0, tail: '',
   recent: new Map(), projWin: null,
   projMode: 'ask', triggerPhrases: DEFAULT_TRIGGERS.slice(),
-  projLayout: 'en', projTrEn: 'kjv', projTrDe: 'elb1905'
+  projLayout: 'en', projTrEn: 'kjv', projTrDe: 'elb1905',
+  translateTo: 'none', aiEnabled: false, aiUnavailableWarned: false
 };
 function cur() { return S.current; }
 
@@ -820,7 +848,12 @@ async function api(method, url, body) {
 function shapeSermon(detail) {
   return {
     id: detail.id, title: detail.title, date: detail.date, elapsed: detail.elapsed,
-    paras: (detail.paragraphs || []).map(p => ({ id: p.id, t: p.t, lang: p.lang, text: p.text, refs: p.refs || [] })),
+    paras: (detail.paragraphs || []).map(p => ({
+      id: p.id, t: p.t, lang: p.lang, text: p.text, refs: p.refs || [],
+      correctedText: p.correctedText || null, translatedText: p.translatedText || null, translatedLang: p.translatedLang || null,
+      translatedDraft: !!(p.translatedText && (AI_LOWER_CONFIDENCE_LANGS.has(p.lang) || AI_LOWER_CONFIDENCE_LANGS.has(p.translatedLang))),
+      view: 'original'
+    })),
     mentions: detail.mentions || []
   };
 }
@@ -849,6 +882,7 @@ async function doLogout() {
 }
 
 async function openSermon(id) {
+  if (S.current && S.current.paras.length) queueAiForParagraph(S.current.paras[S.current.paras.length - 1]);
   const j = await api('GET', '/api/sermons/' + id);
   S.current = shapeSermon(j.sermon);
   S.curId = j.sermon.id;
@@ -880,7 +914,7 @@ async function saveSermon() {
   try {
     const j = await api('PATCH', '/api/sermons/' + s.id, {
       title: s.title, date: s.date, elapsed: s.elapsed,
-      paragraphs: s.paras.map(p => ({ t: p.t, lang: p.lang, text: p.text, refs: p.refs || [] })),
+      paragraphs: s.paras.map(p => ({ t: p.t, lang: p.lang, text: p.text, refs: p.refs || [], correctedText: p.correctedText || null, translatedText: p.translatedText || null, translatedLang: p.translatedLang || null })),
       baseUpdatedAt: S.updatedAt
     });
     S.updatedAt = j.sermon.updatedAt;
@@ -899,7 +933,8 @@ async function saveSettings() {
   try {
     await api('PATCH', '/api/settings', {
       lang: S.lang, accent: S.accent, tr: S.tr, projMode: S.projMode,
-      triggerPhrases: S.triggerPhrases, projLayout: S.projLayout, projTrEn: S.projTrEn, projTrDe: S.projTrDe
+      triggerPhrases: S.triggerPhrases, projLayout: S.projLayout, projTrEn: S.projTrEn, projTrDe: S.projTrDe,
+      translateTo: S.translateTo, aiEnabled: S.aiEnabled
     });
   } catch (e) { /* settings are small and non-critical here; a later save will retry */ }
 }
@@ -962,20 +997,90 @@ const refKey = o => o.bookNr + ':' + o.chapter + ':' + (o.from == null ? '' : o.
 /* ------------------------------------------------------------------ */
 /* Transcript                                                          */
 /* ------------------------------------------------------------------ */
-function langTag(l) { return l === 'en' ? 'EN' : l === 'de' ? 'DE' : l === 'tw' ? 'TW' : 'NOTE'; }
+function langTag(l) { return l === 'en' ? 'EN' : l === 'de' ? 'DE' : l === 'tw' ? 'TW' : l === 'kri' ? 'KRI' : 'NOTE'; }
+const LANG_FULL_NAME = { en: 'English', de: 'German', tw: 'Twi', kri: 'Krio' };
+// Claude's Krio and Twi are noticeably less reliable than its English/German - so any
+// translation touching either one is always shown as a draft, never presented as final.
+const AI_LOWER_CONFIDENCE_LANGS = new Set(['kri', 'tw']);
 
+function rerenderPara(p) {
+  const old = document.querySelector('[data-pid="' + p.id + '"]');
+  if (old) old.replaceWith(paraEl(p));
+}
 function paraEl(p) {
+  const showingCorrected = p.view === 'corrected' && p.correctedText != null;
   const txt = h('div', { class: 'ptext', contenteditable: 'true', spellcheck: 'false', 'data-id': p.id });
-  txt.textContent = p.text;
-  txt.addEventListener('input', () => { p.text = txt.textContent; save(); });
+  txt.textContent = showingCorrected ? p.correctedText : p.text;
+  txt.addEventListener('input', () => {
+    if (showingCorrected) p.correctedText = txt.textContent; else p.text = txt.textContent;
+    p.editedAt = Date.now(); // a hand edit after this point is never overwritten by a still-in-flight AI job
+    save();
+  });
   const refs = h('div', { class: 'prefs' });
   (p.refs || []).forEach(r => refs.append(chipEl(r)));
+
+  const toggle = p.correctedText != null ? h('div', { class: 'aiToggle' },
+    h('button', { class: 'small' + (!showingCorrected ? ' primary' : ''), title: 'Show exactly what was recognized/typed', onclick: () => { p.view = 'original'; save(); rerenderPara(p); } }, 'Original'),
+    h('button', { class: 'small' + (showingCorrected ? ' primary' : ''), title: 'Show the AI-corrected version', onclick: () => { p.view = 'corrected'; save(); rerenderPara(p); } }, 'Corrected')
+  ) : null;
+
+  const translation = p.translatedText ? h('div', { class: 'ptrans' },
+    p.translatedDraft ? h('span', { class: 'tag' }, 'draft translation, please review') : null,
+    p.translatedText
+  ) : null;
+
   return h('div', { class: 'para', 'data-pid': p.id },
-    h('div', { class: 'meta' }, h('div', {}, mmss(p.t)), h('b', {}, langTag(p.lang))),
-    txt, refs);
+    h('div', { class: 'meta' }, h('div', {}, mmss(p.t)), h('b', {}, langTag(p.lang)), toggle),
+    txt, translation, refs);
 }
 function chipEl(r) {
   return h('button', { class: 'chip', title: 'Project this scripture', onclick: () => projectRef(r) }, refLabel(r));
+}
+
+/* ------------------------------------------------------------------ */
+/* AI correction / translation                                        */
+/* ------------------------------------------------------------------ */
+// Only finished paragraphs are ever sent (queued the moment a new paragraph starts,
+// or when listening stops) - never a word as it's still being recognized, and the
+// live transcript never waits on the AI: this queue runs a couple of jobs at a time
+// in the background and updates the paragraph in place whenever a reply comes back.
+const aiQueue = [];
+let aiActive = 0;
+const AI_MAX_CONCURRENT = 2;
+function queueAiForParagraph(p) {
+  if (!S.aiEnabled || !p || !p.text || !p.text.trim()) return;
+  let translateTo = S.translateTo && S.translateTo !== 'none' ? S.translateTo : null;
+  const lang = ['en', 'de', 'tw', 'kri'].includes(p.lang) ? p.lang : S.lang;
+  if (translateTo === lang) translateTo = null; // already in that language - correction still runs, just no translation
+  aiQueue.push({ p, text: p.text, lang, translateTo, queuedAt: Date.now() });
+  pumpAiQueue();
+}
+function pumpAiQueue() {
+  while (aiActive < AI_MAX_CONCURRENT && aiQueue.length) {
+    const job = aiQueue.shift();
+    aiActive++;
+    runAiJob(job).finally(() => { aiActive--; pumpAiQueue(); });
+  }
+}
+async function runAiJob(job) {
+  const { p, text, lang, translateTo, queuedAt } = job;
+  try {
+    const j = await api('POST', '/api/ai/process', { text, lang, correct: true, translateTo });
+    // A hand edit made while this was in flight always wins - never overwrite it.
+    if (p.editedAt && p.editedAt > queuedAt) return;
+    if (!S.sermons.some(s => s.id === S.curId) || !cur().paras.includes(p)) return; // sermon was switched/deleted meanwhile
+    let changed = false;
+    if (j.corrected) { p.correctedText = j.corrected; changed = true; }
+    if (j.translated) { p.translatedText = j.translated; p.translatedLang = translateTo; p.translatedDraft = !!j.draft; changed = true; }
+    if (changed) { save(); rerenderPara(p); }
+  } catch (e) {
+    if (e.status === 429) toast(e.message || "You reached today's AI limit. The rest of your notes are still saved.");
+    else if (e.status === 503 && !S.aiUnavailableWarned) {
+      S.aiUnavailableWarned = true;
+      toast('AI correction/translation is currently unavailable. Your notes are unaffected.');
+    }
+    // Any other failure: the original text stands untouched, per "must keep working normally".
+  }
 }
 function renderParas() {
   const box = $('paras');
@@ -993,12 +1098,13 @@ function addText(text, forceNew, lang) {
   const box = $('paras');
   if (!s.paras.length) box.textContent = '';
   let p = s.paras[s.paras.length - 1];
+  const prev = p; // the paragraph a brand new one (if any) is closing off - now "finished"
   const lastEl = p && box.querySelector('[data-pid="' + p.id + '"] .ptext');
   const editing = lastEl && document.activeElement === lastEl;
   const cap = t => t.charAt(0).toUpperCase() + t.slice(1);
   let isNewPara;
   if (!p || forceNew || p.lang !== lang || p.text.length > 700 || editing) {
-    p = { id: uid(), t: s.elapsed, lang, text: cap(text), refs: [] };
+    p = { id: uid(), t: s.elapsed, lang, text: cap(text), refs: [], correctedText: null, translatedText: null, translatedLang: null, translatedDraft: false, view: 'original' };
     s.paras.push(p);
     const near = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
     box.append(paraEl(p));
@@ -1012,6 +1118,7 @@ function addText(text, forceNew, lang) {
     isNewPara = false;
   }
   save();
+  if (isNewPara && prev) queueAiForParagraph(prev);
   return { p, isNewPara };
 }
 function setInterim(t) { $('interim').textContent = t || ''; }
@@ -1475,6 +1582,7 @@ function setStatus() {
   el.className = 'pill';
   if (!S.running) { el.textContent = 'Idle'; }
   else if (S.lang === 'tw') { el.textContent = 'Twi: type notes below'; el.classList.add('warn'); }
+  else if (S.lang === 'kri') { el.textContent = 'Krio: type notes below'; el.classList.add('warn'); }
   else { el.textContent = 'Listening (' + langTag(S.lang) + ')'; el.classList.add('live'); }
   const b = $('recBtn');
   b.textContent = S.running ? 'Stop listening' : 'Start listening';
@@ -1487,7 +1595,7 @@ function stopCurrentRecognition() {
   try { if (S.rec) S.rec.stop(); } catch (e) {}
 }
 function spawn() {
-  if (!S.running || S.lang === 'tw' || !SR) return;
+  if (!S.running || S.lang === 'tw' || S.lang === 'kri' || !SR) return;
   const lang = S.lang;
   const r = new SR();
   r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
@@ -1570,6 +1678,8 @@ function stopRec() {
   stopMeter();
   stopAudioRecording();
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  const s = cur();
+  if (s && s.paras.length) queueAiForParagraph(s.paras[s.paras.length - 1]);
   setInterim(''); setStatus(); save();
 }
 function setLang(l) {
@@ -1577,7 +1687,7 @@ function setLang(l) {
   document.querySelectorAll('#langSeg button').forEach(b => b.classList.toggle('active', b.dataset.lang === l));
   fillAccents(); setStatus(); save();
   if (S.running) {
-    if (S.rec) stopCurrentRecognition(); // onend restarts immediately with the new language/accent (or, for Twi, just stays stopped)
+    if (S.rec) stopCurrentRecognition(); // onend restarts immediately with the new language/accent (or, for Twi/Krio, just stays stopped - spawn() itself skips those)
     else spawn();
   }
 }
@@ -1612,17 +1722,37 @@ function fname(ext) {
   return ((s.date || 'sermon') + '-' + (s.title || 'sermon')).replace(/[^\w\-]+/g, '_') + '.' + ext;
 }
 const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// What to put in an exported file for one paragraph, per the "Text to include" choice
+// in the Export card - the original transcript is always available even when a mode
+// asks for corrected/translated text, since AI processing can fail or simply not have
+// finished yet for the most recent paragraphs.
+function paraExportLines(p, mode) {
+  const orig = p.text;
+  const corr = p.correctedText;
+  const trans = p.translatedText;
+  switch (mode) {
+    case 'corrected': return [corr || orig];
+    case 'both': return corr && corr !== orig ? [orig, 'Corrected: ' + corr] : [orig];
+    case 'translation': return [trans || orig];
+    case 'origTrans': return trans ? [orig, 'Translation: ' + trans] : [orig];
+    case 'side': return [trans ? (orig + '  |  ' + trans) : orig];
+    default: return [orig];
+  }
+}
+function exportMode() { const el = $('exportModeSel'); return el ? el.value : 'original'; }
 function exportTxt() {
   const s = cur();
+  const mode = exportMode();
   let t = (s.title || 'Sermon') + '\n' + (s.date || '') + '\n\n';
-  s.paras.forEach(p => { t += '[' + mmss(p.t) + '] ' + p.text + '\n\n'; });
+  s.paras.forEach(p => { t += '[' + mmss(p.t) + '] ' + paraExportLines(p, mode).join('\n') + '\n\n'; });
   if (s.mentions.length) t += 'Scripture mentioned:\n' + s.mentions.map(m => '- ' + refLabel(m)).join('\n') + '\n';
   download(fname('txt'), 'text/plain;charset=utf-8', t);
 }
 function exportWord() {
   const s = cur();
+  const mode = exportMode();
   let body = '<h1>' + esc(s.title || 'Sermon') + '</h1><p>' + esc(s.date || '') + '</p>';
-  s.paras.forEach(p => { body += '<p><span style="color:#888">[' + mmss(p.t) + ']</span> ' + esc(p.text) + '</p>'; });
+  s.paras.forEach(p => { body += '<p><span style="color:#888">[' + mmss(p.t) + ']</span> ' + paraExportLines(p, mode).map(esc).join('<br>') + '</p>'; });
   if (s.mentions.length) body += '<h2>Scripture mentioned</h2><ul>' + s.mentions.map(m => '<li>' + esc(refLabel(m)) + '</li>').join('') + '</ul>';
   const html = '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>' + esc(s.title || 'Sermon') + '</title></head><body style="font-family:Calibri,Arial;font-size:12pt">' + body + '</body></html>';
   download(fname('doc'), 'application/msword', '\ufeff' + html);
@@ -1664,6 +1794,8 @@ async function startApp() {
     try { await api('DELETE', '/api/me'); toast('Your account has been deleted.'); location.href = '/'; }
     catch (e) { toast('Could not delete your account: ' + e.message); }
   });
+  $('aiOptIn').addEventListener('change', e => { S.aiEnabled = e.target.checked; save(); });
+  $('translateToSel').addEventListener('change', e => { S.translateTo = e.target.value; save(); });
   connectLiveWs();
   loadScreenCode();
   $('copyProjLinkBtn').addEventListener('click', async () => {
@@ -1695,6 +1827,8 @@ async function startApp() {
   document.querySelectorAll('#langSeg button').forEach(b => b.addEventListener('click', () => setLang(b.dataset.lang)));
   document.querySelectorAll('#langSeg button').forEach(b => b.classList.toggle('active', b.dataset.lang === S.lang));
   fillAccents(); setStatus(); renderLive();
+  $('translateToSel').value = S.translateTo;
+  $('aiOptIn').checked = !!S.aiEnabled;
 
   $('projModeSel').value = S.projMode;
   $('voiceSettings').style.display = S.projMode === 'voice' ? '' : 'none';
