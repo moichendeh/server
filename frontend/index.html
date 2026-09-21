@@ -647,6 +647,35 @@ BOOKS.forEach((b, i) => {
     if (!ALIAS.has(k)) ALIAS.set(k, i + 1);
   });
 });
+// Real speech often drops the leading number of a numbered-book pair ("Peter 5:5"
+// instead of "2 Peter 5:5"). Map each bare family name (English and German, main name
+// plus its extra spellings) to every book it could mean - detect() below resolves
+// which one from the chapter number and, failing that, recent context. John is
+// deliberately not one of these: unnumbered "John" always means the Gospel of John,
+// which already has its own plain alias.
+const BOOK_INDEX = new Map(BOOKS.map((b, i) => [b[0], i + 1]));
+const AMBIGUOUS_FAMILIES = [
+  ['1 Samuel', '2 Samuel'],
+  ['1 Kings', '2 Kings'],
+  ['1 Chronicles', '2 Chronicles'],
+  ['1 Corinthians', '2 Corinthians'],
+  ['1 Thessalonians', '2 Thessalonians'],
+  ['1 Timothy', '2 Timothy'],
+  ['1 Peter', '2 Peter']
+];
+const stripBookNum = s => s.replace(/^[123]\.?\s*/, '');
+AMBIGUOUS_FAMILIES.forEach(names => {
+  const nrs = names.map(n => BOOK_INDEX.get(n));
+  const bare = new Set();
+  nrs.forEach(nr => {
+    const b = BOOKS[nr - 1];
+    [b[0], ...b[1], b[2], ...b[3]].forEach(full => bare.add(stripBookNum(full)));
+  });
+  bare.forEach(name => {
+    const k = normalize(name).replace(/\./g, '').trim();
+    if (k && !ALIAS.has(k)) ALIAS.set(k, nrs);
+  });
+});
 const ALIAS_SRC = [...ALIAS.keys()]
   .sort((a, b) => b.length - a.length)
   .map(a => a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+'))
@@ -679,19 +708,45 @@ function splitChapterVerse(numStr, maxCh) {
   return { chapter: candidates[0].chapter, verse: candidates[0].verse, ambiguous: candidates.length > 1 };
 }
 
+// How long "the most recent scripture mentioned" stays eligible to silently resolve
+// a bare family name like "Peter" - after this, an unclear reference gets a "Which
+// one?" card instead of a guess based on stale context.
+const RECENT_BOOK_MS = 5 * 60 * 1000;
+
 function detect(raw, lastRef) {
   const text = normalize(raw);
   const out = [];
   const re = new RegExp(REF_SRC, 'giu');
   let m;
   while ((m = re.exec(text))) {
-    const nr = ALIAS.get(m[1].replace(/\s+/g, ' '));
-    if (!nr) continue;
-    const maxCh = BOOKS[nr - 1][4];
+    const entry = ALIAS.get(m[1].replace(/\s+/g, ' '));
+    if (!entry) continue;
     let ch = +m[2];
     let v1 = m[3] ? +m[3] : null;
     let v2 = m[4] ? +m[4] : null;
-    let check = false;
+    let nr, check = false;
+    if (Array.isArray(entry)) {
+      // A family name with no number was said ("Peter 5:5") - only the book(s) that
+      // actually have this chapter are candidates (rule 1). If more than one does,
+      // prefer whichever book was mentioned most recently, if it's one of them
+      // (rule 2); otherwise this is genuinely unclear - surface a "Which one?" card
+      // rather than guess (rule 3), and never split/re-interpret the digits further.
+      const viable = entry.filter(cand => ch >= 1 && ch <= BOOKS[cand - 1][4]);
+      if (!viable.length) continue;
+      if (viable.length === 1) {
+        nr = viable[0];
+      } else if (lastRef && lastRef.at && Date.now() - lastRef.at <= RECENT_BOOK_MS && viable.includes(lastRef.bookNr)) {
+        nr = lastRef.bookNr;
+      } else {
+        if (v1 !== null && (v1 < 1 || v1 > 176)) { v1 = null; v2 = null; }
+        if (v2 !== null && (v1 === null || v2 <= v1 || v2 > 176)) v2 = null;
+        out.push({ ambiguousBooks: viable, chapter: ch, from: v1, to: v1 === null ? null : (v2 !== null ? v2 : v1), whole: v1 === null });
+        continue;
+      }
+    } else {
+      nr = entry;
+    }
+    const maxCh = BOOKS[nr - 1][4];
     if (maxCh === 1 && v1 === null) { v1 = ch; ch = 1; }
     else if (v1 === null && ch > maxCh) {
       const split = splitChapterVerse(m[2], maxCh);
@@ -704,7 +759,8 @@ function detect(raw, lastRef) {
     out.push({ bookNr: nr, chapter: ch, from: v1, to: v1 === null ? null : (v2 !== null ? v2 : v1), whole: v1 === null, check });
   }
   let anchor = lastRef;
-  if (out.length) anchor = { bookNr: out[out.length - 1].bookNr, chapter: out[out.length - 1].chapter };
+  const lastDefinite = [...out].reverse().find(d => d.bookNr);
+  if (lastDefinite) anchor = { bookNr: lastDefinite.bookNr, chapter: lastDefinite.chapter };
   if (anchor) {
     const rest = text.replace(new RegExp(REF_SRC, 'giu'), ' ');
     const fre = new RegExp(FOLLOW_SRC, 'giu');
@@ -934,7 +990,7 @@ function refLabel(o) {
   if (o.from != null) s += ':' + o.from + (o.to != null && o.to > o.from ? '\u2013' + o.to : '');
   return s;
 }
-const refKey = o => o.bookNr + ':' + o.chapter + ':' + (o.from == null ? '' : o.from) + '-' + (o.to == null ? '' : o.to);
+const refKey = o => (o.bookNr != null ? o.bookNr : 'amb' + (o.ambiguousBooks || []).join(',')) + ':' + o.chapter + ':' + (o.from == null ? '' : o.from) + '-' + (o.to == null ? '' : o.to);
 
 /* ------------------------------------------------------------------ */
 /* Transcript                                                          */
@@ -1034,6 +1090,7 @@ function checkVoiceTrigger(text) {
   const foundHere = detect(text, S.lastRef);
   if (foundHere.length) {
     const d = foundHere[foundHere.length - 1];
+    if (!d.bookNr) return; // unclear which book - its "Which one?" card is already up; never guess
     const from = d.whole ? 1 : d.from, to = d.whole ? 6 : d.to;
     const sg = S.suggestions.find(x => x.status === 'pending' && x.bookNr === d.bookNr && x.chapter === d.chapter && x.from === from && x.to === to);
     if (sg) { cancelAutoProject(sg); project(sg, { auto: true }); }
@@ -1041,8 +1098,9 @@ function checkVoiceTrigger(text) {
     return;
   }
 
-  // (b) No scripture in this line - only reuse a suggestion that appeared in the last 20 seconds.
-  const pend = S.suggestions.filter(x => x.status === 'pending' && x.createdAt && Date.now() - x.createdAt <= 20000);
+  // (b) No scripture in this line - only reuse a resolved suggestion from the last 20
+  // seconds (never one still waiting on a "Which one?" click).
+  const pend = S.suggestions.filter(x => x.status === 'pending' && x.bookNr && x.createdAt && Date.now() - x.createdAt <= 20000);
   if (pend[0]) { cancelAutoProject(pend[0]); project(pend[0], { auto: true }); }
   else toast('Nothing new to project.');
 }
@@ -1055,20 +1113,15 @@ function runDetect(text, para) {
   S.tail = text.slice(-40);
   const found = detect(combined, S.lastRef);
   found.forEach(d => {
-    if (!d.followUp) S.lastRef = { bookNr: d.bookNr, chapter: d.chapter };
+    if (!d.followUp && d.bookNr) S.lastRef = { bookNr: d.bookNr, chapter: d.chapter, at: Date.now() };
     addSuggestion(d, para);
   });
 }
-function addSuggestion(d, para) {
-  const now = Date.now();
-  const key = refKey(d) + (d.followUp ? 'f' : '');
-  if (S.recent.has(key) && now - S.recent.get(key) < 25000) return;
-  S.recent.set(key, now);
-  const sg = { id: uid(), bookNr: d.bookNr, chapter: d.chapter, from: d.from, to: d.to, whole: !!d.whole, followUp: !!d.followUp, check: !!d.check, status: 'pending', verses: null, error: null, flash: true, createdAt: now };
-  if (sg.whole) { sg.from = 1; sg.to = 6; }
-  S.suggestions.unshift(sg);
-  S.suggestions = S.suggestions.filter(x => x.status === 'pending').slice(0, 6)
-    .concat(S.suggestions.filter(x => x.status !== 'pending').slice(0, 3));
+// Finishes turning a resolved reference (bookNr known) into a live suggestion: records
+// the mention, tags the paragraph it came from, loads the preview text, and - depending
+// on the projector mode - arms auto-project. Called right away for a reference that was
+// clear from the start, and again once a "Which one?" card is resolved by a click.
+function finalizeSuggestion(sg, para) {
   const ref = { bookNr: sg.bookNr, chapter: sg.chapter, from: sg.from, to: sg.to };
   const s = cur();
   const mk = refKey(ref);
@@ -1080,9 +1133,36 @@ function addSuggestion(d, para) {
     if (pe) pe.append(chipEl(ref));
   }
   save();
-  renderSugs(); renderMentions();
+  renderMentions();
   preview(sg);
   armAutoProject(sg);
+}
+function addSuggestion(d, para) {
+  const now = Date.now();
+  const key = refKey(d) + (d.followUp ? 'f' : '');
+  if (S.recent.has(key) && now - S.recent.get(key) < 25000) return;
+  S.recent.set(key, now);
+  const sg = {
+    id: uid(), bookNr: d.bookNr || null, ambiguousBooks: d.ambiguousBooks || null,
+    chapter: d.chapter, from: d.from, to: d.to, whole: !!d.whole, followUp: !!d.followUp,
+    check: !!d.check, status: 'pending', verses: null, error: null, flash: true, createdAt: now
+  };
+  if (sg.whole) { sg.from = 1; sg.to = 6; }
+  S.suggestions.unshift(sg);
+  S.suggestions = S.suggestions.filter(x => x.status === 'pending').slice(0, 6)
+    .concat(S.suggestions.filter(x => x.status !== 'pending').slice(0, 3));
+  renderSugs();
+  if (sg.ambiguousBooks) { sg._para = para; return; } // wait for a click on "Which one?" - never guess
+  finalizeSuggestion(sg, para);
+}
+// Called when the pastor's team clicks one of the "Which one?" buttons.
+function resolveAmbiguous(sg, bookNr) {
+  const para = sg._para;
+  sg._para = null;
+  sg.bookNr = bookNr;
+  sg.ambiguousBooks = null;
+  renderSugs();
+  finalizeSuggestion(sg, para);
 }
 function armAutoProject(sg) {
   if (S.projMode !== 'auto') return;
@@ -1149,6 +1229,19 @@ function renderSugs() {
   pend.slice(0, 6).forEach((sg, idx) => {
     const card = h('div', { class: 'sg' + (sg.flash ? ' flash' : '') });
     sg.flash = false;
+    if (sg.ambiguousBooks) {
+      const chRef = sg.chapter + (sg.from != null ? ':' + sg.from + (sg.to != null && sg.to > sg.from ? '–' + sg.to : '') : '');
+      const top = h('div', { class: 'top' },
+        h('div', {}, h('span', { class: 'ref' }, chRef), h('span', { class: 'tag' }, 'which book?')),
+        h('span', { class: 'hint' }, 'key ', h('kbd', {}, String(idx + 1))));
+      const acts = h('div', { class: 'acts' },
+        ...sg.ambiguousBooks.map(nr => h('button', { class: 'primary small', onclick: () => resolveAmbiguous(sg, nr) },
+          refLabel({ bookNr: nr, chapter: sg.chapter, from: sg.from, to: sg.to }))),
+        h('button', { class: 'small', onclick: () => { sg.status = 'dismissed'; renderSugs(); } }, 'Dismiss'));
+      card.append(top, acts);
+      box.append(card);
+      return;
+    }
     const top = h('div', { class: 'top' },
       h('div', {}, h('span', { class: 'ref' }, refLabel(sg)), sg.followUp ? h('span', { class: 'tag' }, 'follow-up') : null, sg.whole ? h('span', { class: 'tag' }, 'chapter') : null, sg.check ? h('span', { class: 'tag' }, 'please check') : null),
       h('span', { class: 'hint' }, 'key ', h('kbd', {}, String(idx + 1))));
@@ -1209,6 +1302,7 @@ function sendPage() {
 }
 async function project(sg, opts) {
   opts = opts || {};
+  if (sg.ambiguousBooks) { toast('Choose which book this is first.'); return; }
   try {
     const layout = S.projLayout;
     const jobs = [];
@@ -1496,7 +1590,7 @@ async function startApp() {
   $('accentSel').addEventListener('change', e => { S.accent[S.lang] = e.target.value; save(); if (S.running && S.rec) { try { S.rec.stop(); } catch (x) {} } });
   $('trSel').addEventListener('change', e => {
     S.tr = e.target.value; save();
-    S.suggestions.forEach(sg => { if (sg.status === 'pending') preview(sg); });
+    S.suggestions.forEach(sg => { if (sg.status === 'pending' && sg.bookNr) preview(sg); });
     if (S.live) project({ ...S.live.sg, status: 'pending' });
     renderMentions();
     document.querySelectorAll('.prefs').forEach(pe => { /* labels follow the translation language */ });
