@@ -36,6 +36,9 @@ header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:6px 0 12p
 .pill.live{background:var(--ok-bg);color:var(--ok);font-weight:600}
 .pill.warn{background:#fdecea;color:var(--danger)}
 label.inl{display:inline-flex;gap:6px;align-items:center;font-size:14px;color:var(--muted)}
+.micMeterWrap{display:inline-block;vertical-align:middle;width:160px;height:10px;background:#ece8dc;border-radius:6px;overflow:hidden}
+.micMeterBar{display:block;height:100%;width:0%;background:var(--ok);transition:width .1s linear}
+.micMeterBar.low{background:var(--danger)}
 main{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr);gap:16px;align-items:start}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
 .card h2{margin:0 0 10px;font-size:15px;letter-spacing:.02em;text-transform:uppercase;color:var(--muted)}
@@ -191,6 +194,7 @@ body.proj #loginScreen{display:none}
     <button id="openProj">Open projector window</button>
     <span id="status" class="pill">Idle</span>
     <span id="clock" class="pill">00:00</span>
+    <span id="restartCount" class="pill warn" style="display:none"></span>
     <span id="syncPill" class="pill"></span>
     <span id="liveStatus" class="pill"></span>
   </section>
@@ -255,6 +259,25 @@ body.proj #loginScreen{display:none}
             <button id="copyProjLinkBtn" class="small">Copy link</button>
             <button id="newProjCodeBtn" class="small ghost">New link (stops old ones working)</button>
           </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Microphone</h2>
+        <div class="setting">
+          <label class="inl">Input
+            <select id="micSel"><option value="">System default microphone</option></select>
+          </label>
+          <button id="micTestBtn" class="small" type="button">Test microphone</button>
+        </div>
+        <div class="setting">
+          <span class="micMeterWrap"><span id="micMeterBar" class="micMeterBar"></span></span>
+          <span id="micUsingLabel" class="hint"></span>
+        </div>
+        <p id="micLowWarn" class="hint" style="display:none;color:var(--danger)">Volume too low - move closer to the microphone, or connect it to the sound desk.</p>
+        <p class="hint">Echo cancellation and noise suppression are turned off, and automatic gain is turned on, for this input - both of the former can otherwise remove a quiet, distant voice.</p>
+        <div class="btnrow" style="margin-top:8px">
+          <button id="downloadAudioBtn" class="small" style="display:none" type="button">Download audio</button>
         </div>
       </section>
 
@@ -1390,6 +1413,166 @@ async function regenerateScreenCode() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Microphone: device picker, live level meter, backup recording       */
+/* ------------------------------------------------------------------ */
+// All of this is separate from the browser's own SpeechRecognition capture (see
+// below) - it exists so the pastor's team can (a) see and choose which physical
+// input is in use, (b) see at a glance whether the level is too quiet to transcribe
+// well, and (c) always have a raw backup recording even on the words live
+// transcription drops. None of it is stored anywhere but this browser tab.
+let micStream = null;          // the currently open getUserMedia stream
+let micDeviceId = null;        // chosen input device id, remembered per browser (not per account - a deviceId from one computer means nothing on another)
+let micTesting = false;        // true while "Test microphone" has a stream open outside of an actual listening session
+let micCtx = null, micAnalyser = null, micMeterRaf = null, micLowSince = null;
+let micRestartCount = 0;
+let intentionalRecStop = false; // set just before WE call recognition.stop() on purpose (language/accent change), so onend doesn't count it as a dropout
+let mediaRecorder = null, audioChunks = [], recordedAudioBlob = null, recordedAudioUrl = null;
+try { micDeviceId = localStorage.getItem('ssMicDeviceId') || null; } catch (e) { /* blocked by browser settings */ }
+
+async function listMicDevices() {
+  const sel = $('micSel');
+  if (!sel || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const mics = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    const keep = sel.value;
+    sel.textContent = '';
+    sel.append(h('option', { value: '' }, 'System default microphone'));
+    mics.forEach((d, i) => sel.append(h('option', { value: d.deviceId }, d.label || ('Microphone ' + (i + 1)))));
+    const want = mics.some(d => d.deviceId === micDeviceId) ? micDeviceId : (mics.some(d => d.deviceId === keep) ? keep : '');
+    sel.value = want || '';
+  } catch (e) { /* leave the picker on "system default" */ }
+}
+// Requests a stream with echo cancellation and noise suppression OFF, and automatic
+// gain ON - the first two are designed to remove exactly the kind of quiet, distant
+// voice a big room produces; automatic gain instead boosts it. Falls back to the
+// system default microphone (with the same settings) if the chosen device is gone.
+async function openMicStream(deviceId) {
+  const base = { echoCancellation: false, noiseSuppression: false, autoGainControl: true };
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { ...base, deviceId: { exact: deviceId } } : base });
+  } catch (e) {
+    if (!deviceId) throw e;
+    toast('That microphone is not available - using the system default instead.');
+    return await navigator.mediaDevices.getUserMedia({ audio: base });
+  }
+}
+function updateMicUsingLabel(stream) {
+  const el = $('micUsingLabel');
+  if (!el) return;
+  const track = stream && stream.getAudioTracks()[0];
+  el.textContent = track ? ('Using: ' + (track.label || 'microphone (name hidden until access is granted)')) : '';
+}
+function startMeter(stream) {
+  stopMeter();
+  try {
+    micCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = micCtx.createMediaStreamSource(stream);
+    micAnalyser = micCtx.createAnalyser();
+    micAnalyser.fftSize = 1024;
+    src.connect(micAnalyser);
+  } catch (e) { return; }
+  const buf = new Uint8Array(micAnalyser.fftSize);
+  const bar = $('micMeterBar'), warn = $('micLowWarn');
+  const LOW_PCT = 6, LOW_HOLD_MS = 6000;
+  const tick = () => {
+    if (!micAnalyser) return;
+    micAnalyser.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; sum += v * v; }
+    const pct = Math.min(100, Math.round(Math.sqrt(sum / buf.length) * 280));
+    if (bar) { bar.style.width = pct + '%'; bar.classList.toggle('low', pct < LOW_PCT); }
+    const now = Date.now();
+    if (pct < LOW_PCT) {
+      if (micLowSince == null) micLowSince = now;
+      if (warn) warn.style.display = (S.running && now - micLowSince > LOW_HOLD_MS) ? '' : 'none';
+    } else {
+      micLowSince = null;
+      if (warn) warn.style.display = 'none';
+    }
+    micMeterRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+function stopMeter() {
+  if (micMeterRaf) cancelAnimationFrame(micMeterRaf);
+  micMeterRaf = null;
+  if (micCtx) { try { micCtx.close(); } catch (e) {} micCtx = null; micAnalyser = null; }
+  micLowSince = null;
+  const bar = $('micMeterBar'); if (bar) { bar.style.width = '0%'; bar.classList.remove('low'); }
+  const warn = $('micLowWarn'); if (warn) warn.style.display = 'none';
+}
+async function toggleMicTest() {
+  const btn = $('micTestBtn');
+  if (micTesting) {
+    micTesting = false;
+    stopMeter();
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    updateMicUsingLabel(null);
+    btn.textContent = 'Test microphone';
+    return;
+  }
+  try {
+    micStream = await openMicStream(micDeviceId);
+    micTesting = true;
+    startMeter(micStream);
+    updateMicUsingLabel(micStream);
+    btn.textContent = 'Stop test';
+    await listMicDevices(); // labels are unlocked now that permission is granted
+  } catch (e) { toast('Could not open the microphone: ' + (e.message || e.name)); }
+}
+// A backup recording of the raw audio, kept only in this browser tab (never sent to
+// the server or saved in the database) - so nothing is lost even on the words live
+// transcription drops entirely.
+function pickRecorderMime() {
+  if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
+  return ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'].find(t => MediaRecorder.isTypeSupported(t)) || '';
+}
+function startAudioRecording(stream) {
+  if (!window.MediaRecorder) return; // no backup recording on this browser - live transcription still works
+  try {
+    audioChunks = [];
+    if (recordedAudioUrl) { URL.revokeObjectURL(recordedAudioUrl); recordedAudioUrl = null; }
+    recordedAudioBlob = null;
+    updateDownloadAudioBtn();
+    const mime = pickRecorderMime();
+    mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) audioChunks.push(e.data); };
+    mediaRecorder.start(1000); // 1s chunks, so a crash mid-sermon loses at most a second, not everything
+  } catch (e) { toast('Backup audio recording could not start: ' + (e.message || e.name)); }
+}
+function stopAudioRecording() {
+  if (!mediaRecorder) return;
+  const mr = mediaRecorder;
+  mediaRecorder = null;
+  mr.onstop = () => {
+    if (audioChunks.length) recordedAudioBlob = new Blob(audioChunks, { type: mr.mimeType || 'audio/webm' });
+    audioChunks = [];
+    updateDownloadAudioBtn();
+  };
+  try { mr.stop(); } catch (e) { /* ignore */ }
+}
+function updateDownloadAudioBtn() {
+  const btn = $('downloadAudioBtn');
+  if (btn) btn.style.display = recordedAudioBlob ? '' : 'none';
+}
+function downloadRecordedAudio() {
+  if (!recordedAudioBlob) return;
+  if (recordedAudioUrl) URL.revokeObjectURL(recordedAudioUrl);
+  recordedAudioUrl = URL.createObjectURL(recordedAudioBlob);
+  const ext = recordedAudioBlob.type.includes('ogg') ? 'ogg' : recordedAudioBlob.type.includes('mp4') ? 'm4a' : 'webm';
+  const a = document.createElement('a');
+  a.href = recordedAudioUrl;
+  a.download = 'sermon-audio-' + (cur() && cur().date ? cur().date : new Date().toISOString().slice(0, 10)) + '.' + ext;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function updateRestartCounterUI() {
+  const el = $('restartCount');
+  if (!el) return;
+  if (micRestartCount > 0) { el.style.display = ''; el.textContent = 'Restarted ' + micRestartCount + (micRestartCount === 1 ? ' time' : ' times'); }
+  else el.style.display = 'none';
+}
+
+/* ------------------------------------------------------------------ */
 /* Speech recognition                                                  */
 /* ------------------------------------------------------------------ */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1404,6 +1587,12 @@ function setStatus() {
   const b = $('recBtn');
   b.textContent = S.running ? 'Stop listening' : 'Start listening';
   b.classList.toggle('on', S.running);
+  const micSelEl = $('micSel'); if (micSelEl) micSelEl.disabled = S.running;
+  const micTestBtnEl = $('micTestBtn'); if (micTestBtnEl) micTestBtnEl.style.display = S.running ? 'none' : '';
+}
+function stopCurrentRecognition() {
+  intentionalRecStop = true;
+  try { if (S.rec) S.rec.stop(); } catch (e) {}
 }
 function spawn() {
   if (!S.running || S.lang === 'tw' || S.lang === 'kri' || !SR) return;
@@ -1431,15 +1620,49 @@ function spawn() {
       toast('Speech service unreachable. Check the internet connection.');
     } else toast('Speech error: ' + e.error);
   };
-  r.onend = () => { setInterim(''); if (S.running && S.rec === r) setTimeout(spawn, 250); };
+  // A continuous recognition session stops on its own fairly often even with nothing
+  // wrong (the browser enforces its own session limit) - restart right away every
+  // time, and only flag it as a dropout when WE didn't ask for the stop.
+  r.onend = () => {
+    setInterim('');
+    if (!S.running || S.rec !== r) return;
+    const wasIntentional = intentionalRecStop;
+    intentionalRecStop = false;
+    if (!wasIntentional) {
+      micRestartCount++;
+      updateRestartCounterUI();
+      toast('Listening was interrupted – restarting…');
+    }
+    spawn();
+  };
   S.rec = r;
-  try { r.start(); } catch (e) { /* already started */ }
+  try {
+    // No shipping browser actually supports directing recognition at a chosen
+    // MediaStreamTrack today (start() takes no arguments per spec) - this is here so
+    // a future browser that adds it is picked up automatically, without this code
+    // ever assuming it works. Today it always falls through to the plain start()
+    // below, which captures from the system/browser default microphone regardless
+    // of the picker above (the picker's guaranteed effect today is the level meter
+    // and the backup recording; to change what recognition itself hears, set the
+    // chosen device as the OS's default input).
+    if (micStream && SR.prototype.start.length > 0) r.start(micStream.getAudioTracks()[0]);
+    else r.start();
+  } catch (e) { try { r.start(); } catch (e2) { /* already started */ } }
 }
 async function requestWake() {
   try { if (navigator.wakeLock) S.wake = await navigator.wakeLock.request('screen'); } catch (e) { /* ignore */ }
 }
-function startRec() {
+async function startRec() {
   if (!SR) { toast('This browser cannot transcribe speech. Please use Chrome or Edge.'); }
+  micRestartCount = 0; updateRestartCounterUI();
+  try {
+    if (!micStream) micStream = await openMicStream(micDeviceId);
+    startMeter(micStream);
+    startAudioRecording(micStream);
+    updateMicUsingLabel(micStream);
+  } catch (e) {
+    toast('Could not open the microphone for the level meter/backup recording (' + (e.message || e.name) + '). Live transcription will still try the system microphone.');
+  }
   S.running = true;
   requestWake();
   clearInterval(S.timer);
@@ -1452,6 +1675,9 @@ function stopRec() {
   clearInterval(S.timer);
   try { if (S.rec) S.rec.stop(); } catch (e) { /* ignore */ }
   try { if (S.wake) S.wake.release(); } catch (e) { /* ignore */ }
+  stopMeter();
+  stopAudioRecording();
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   const s = cur();
   if (s && s.paras.length) queueAiForParagraph(s.paras[s.paras.length - 1]);
   setInterim(''); setStatus(); save();
@@ -1461,8 +1687,7 @@ function setLang(l) {
   document.querySelectorAll('#langSeg button').forEach(b => b.classList.toggle('active', b.dataset.lang === l));
   fillAccents(); setStatus(); save();
   if (S.running) {
-    if (l === 'tw' || l === 'kri') { try { if (S.rec) S.rec.stop(); } catch (e) {} setInterim(''); }
-    else if (S.rec) { try { S.rec.stop(); } catch (e) {} setTimeout(spawn, 350); }
+    if (S.rec) stopCurrentRecognition(); // onend restarts immediately with the new language/accent (or, for Twi/Krio, just stays stopped - spawn() itself skips those)
     else spawn();
   }
 }
@@ -1627,7 +1852,23 @@ async function startApp() {
   $('projTrDeSel').addEventListener('change', e => { S.projTrDe = e.target.value; save(); if (S.live) project({ ...S.live.sg, status: 'pending' }); });
 
   $('recBtn').addEventListener('click', () => S.running ? stopRec() : startRec());
-  $('accentSel').addEventListener('change', e => { S.accent[S.lang] = e.target.value; save(); if (S.running && S.rec) { try { S.rec.stop(); } catch (x) {} } });
+  $('accentSel').addEventListener('change', e => { S.accent[S.lang] = e.target.value; save(); if (S.running && S.rec) stopCurrentRecognition(); });
+  $('micTestBtn').addEventListener('click', toggleMicTest);
+  $('downloadAudioBtn').addEventListener('click', downloadRecordedAudio);
+  $('micSel').addEventListener('change', async () => {
+    if (S.running) return; // stop listening first to switch microphones mid-service
+    micDeviceId = $('micSel').value || null;
+    try { localStorage.setItem('ssMicDeviceId', micDeviceId || ''); } catch (e) {}
+    if (micTesting) {
+      if (micStream) micStream.getTracks().forEach(t => t.stop());
+      try { micStream = await openMicStream(micDeviceId); startMeter(micStream); updateMicUsingLabel(micStream); }
+      catch (e) { toast('Could not switch microphone: ' + (e.message || e.name)); }
+    }
+  });
+  listMicDevices();
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', listMicDevices);
+  }
   $('trSel').addEventListener('change', e => {
     S.tr = e.target.value; save();
     S.suggestions.forEach(sg => { if (sg.status === 'pending') preview(sg); });
