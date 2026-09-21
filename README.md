@@ -92,9 +92,27 @@ backups - check their dashboard.
   database (Neon/Supabase) - those require encryption, which is the normal setting.
 - `ADMIN_EMAILS` - a comma-separated list of email addresses that should be Admins,
   e.g. `pastor@example.com,office@example.com`. See below.
+- `API_BIBLE_KEY` - optional, see **Bible translations** below.
 
 If you ever need to recreate `.env`, copy `backend/.env.example` to `backend/.env`
 and fill in your own values.
+
+## Bible translations
+
+King James (KJV), World English Bible (WEB), American Standard (ASV) and the two
+German Elberfelder editions are fetched straight from the browser, from free public
+Bible APIs - no setup needed.
+
+NIV, AMP and CSB come from [api.bible](https://scripture.api.bible) instead, since
+those translations are licensed rather than public domain. Because that requires an
+API key tied to your account's quota, those three are fetched by the **backend**, not
+the browser - the frontend calls `GET /api/bible/:translation/:bookNr/:chapter` on our
+own server, which forwards the request to api.bible using `API_BIBLE_KEY` and caches
+the result (in the `bible_cache` table, shared across everyone, since Bible text is
+the same for everyone) so the same chapter is only ever fetched from api.bible once.
+If `API_BIBLE_KEY` isn't set, or your api.bible account hasn't been granted one of
+these translations, that translation just reports "not available" rather than
+breaking anything else.
 
 ## Accounts and the Admin page
 
@@ -204,13 +222,19 @@ own throwaway database - never your real data:
   rejected, and creating a new code revokes the old one.
 - **test/rateLimit.test.js** - proves repeated login attempts really do get blocked
   (429) after enough tries.
+- **test/bible.test.js** - the api.bible-backed translations: requires login, rejects
+  an unknown translation or an invalid book/chapter, parses a real api.bible chapter
+  response into the same `{v, t}` shape the frontend expects, serves a repeat request
+  from `bible_cache` instead of calling api.bible again, and reports a translation
+  this account has no api.bible access to as unavailable rather than crashing. Runs
+  against a fake api.bible (no real key or network call needed).
 
 By default these run against local Postgres databases named `sermon_scribe_test`,
 `sermon_scribe_test_isolation`, `sermon_scribe_test_admin`, `sermon_scribe_test_privacy`,
-`sermon_scribe_test_live`, and `sermon_scribe_test_ratelimit`. Point any of them
-elsewhere with `DATABASE_URL_TEST`, `DATABASE_URL_TEST_ISOLATION`,
-`DATABASE_URL_TEST_ADMIN`, `DATABASE_URL_TEST_PRIVACY`, `DATABASE_URL_TEST_LIVE`, or
-`DATABASE_URL_TEST_RATELIMIT`.
+`sermon_scribe_test_live`, `sermon_scribe_test_ratelimit`, and `sermon_scribe_test_bible`.
+Point any of them elsewhere with `DATABASE_URL_TEST`, `DATABASE_URL_TEST_ISOLATION`,
+`DATABASE_URL_TEST_ADMIN`, `DATABASE_URL_TEST_PRIVACY`, `DATABASE_URL_TEST_LIVE`,
+`DATABASE_URL_TEST_RATELIMIT`, or `DATABASE_URL_TEST_BIBLE`.
 
 ## Security notes
 
@@ -256,6 +280,10 @@ so they're never committed to git):
   Connection Details). It should end in `?sslmode=require`.
 - `ADMIN_EMAILS` - the email address(es) that should be Admins, comma-separated, e.g.
   `pastor@example.com,office@example.com`. See **Accounts and the Admin page** above.
+- `API_BIBLE_KEY` - optional. Your API key from [scripture.api.bible](https://scripture.api.bible),
+  needed only for the NIV, AMP and CSB translations (see **Bible translations** below).
+  Leave it blank and those three translations simply show as unavailable - everything
+  else works without it.
 
 `NODE_ENV=production` is already set for you in `render.yaml` - this is what turns on
 `secure` cookies (HTTPS-only), which only works correctly once the app is actually

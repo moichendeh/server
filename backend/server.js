@@ -22,6 +22,7 @@ app.use('/api/sermons', require('./routes/sermons'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/import', require('./routes/import'));
 app.use('/api/screen-code', require('./routes/screenCode'));
+app.use('/api/bible', require('./routes/bible'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/me', require('./routes/me'));
 

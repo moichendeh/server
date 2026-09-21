@@ -22,3 +22,7 @@ services:
       # pastor@example.com, helper@example.com
       - key: ADMIN_EMAILS
         sync: false
+      # Your api.bible API key (scripture.api.bible) - enables the NIV, AMP and CSB
+      # translations. Leave unset and those translations simply show as unavailable.
+      - key: API_BIBLE_KEY
+        sync: false

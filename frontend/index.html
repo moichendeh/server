@@ -532,7 +532,10 @@ const TRANSLATIONS = {
   web:     { label: 'World English Bible (WEB)',   lang: 'en', src: 'bibleapi', id: 'web' },
   asv:     { label: 'American Standard (ASV)',     lang: 'en', src: 'bibleapi', id: 'asv' },
   elb1905: { label: 'Elberfelder 1905 (Deutsch)',  lang: 'de', src: 'getbible', id: 'elberfelder1905' },
-  elb1871: { label: 'Elberfelder 1871 (Deutsch)',  lang: 'de', src: 'getbible', id: 'elberfelder' }
+  elb1871: { label: 'Elberfelder 1871 (Deutsch)',  lang: 'de', src: 'getbible', id: 'elberfelder' },
+  niv:     { label: 'New International Version (NIV)', lang: 'en', src: 'apibible', id: 'niv' },
+  amp:     { label: 'Amplified Bible (AMP)',            lang: 'en', src: 'apibible', id: 'amp' },
+  csb:     { label: 'Christian Standard Bible (CSB)',   lang: 'en', src: 'apibible', id: 'csb' }
 };
 
 const ACCENTS = {
@@ -725,6 +728,12 @@ async function fetchSrc(src, id, nr, ch) {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     return j.verses.map(v => ({ v: +v.verse, t: String(v.text).replace(/\s+/g, ' ').trim() }));
+  }
+  if (src === 'apibible') {
+    // Kept server-side (the api.bible key stays on the backend) instead of a direct
+    // browser fetch, unlike the other two sources.
+    const j = await api('GET', '/api/bible/' + id + '/' + nr + '/' + ch);
+    return j.verses;
   }
   const q = encodeURIComponent(BOOKS[nr - 1][0] + ' ' + ch);
   const r = await fetch('https://bible-api.com/' + q + '?translation=' + id);
