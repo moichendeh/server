@@ -59,7 +59,9 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
     <div class="toolbar">
       <span id="aiStatus" class="hint">Loading…</span>
       <button id="aiToggleBtn" disabled>…</button>
+      <button id="aiTestBtn">Test AI connection</button>
     </div>
+    <div id="aiTestResult" class="hint"></div>
   </div>
 
   <div class="card">
@@ -195,6 +197,17 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
       statusEl.textContent = 'Could not load AI status: ' + e.message;
     }
   }
+
+  document.getElementById('aiTestBtn').addEventListener('click', async () => {
+    const out = document.getElementById('aiTestResult');
+    const btn = document.getElementById('aiTestBtn');
+    btn.disabled = true; out.textContent = 'Testing…';
+    try {
+      const j = await api('POST', '/api/admin/ai-test');
+      out.textContent = j.success ? ('✓ Working (model: ' + j.model + ')') : ('✗ Not working - ' + j.reason);
+    } catch (e) { out.textContent = 'Could not run the test: ' + e.message; }
+    btn.disabled = false;
+  });
 
   document.getElementById('backBtn').addEventListener('click', () => { location.href = '/'; });
   document.getElementById('search').addEventListener('input', () => { clearTimeout(window.__t); window.__t = setTimeout(load, 250); });

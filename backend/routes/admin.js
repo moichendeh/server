@@ -1,4 +1,5 @@
 const express = require('express');
+const Anthropic = require('@anthropic-ai/sdk');
 const db = require('../db');
 const asyncHandler = require('../middleware/asyncHandler');
 const { requireAuth, requireRole } = require('../middleware/auth');
@@ -52,6 +53,27 @@ router.post('/ai-config', asyncHandler(async (req, res) => {
          ON CONFLICT (key) DO UPDATE SET value = excluded.value`
     ).run(String(enabled));
     res.json({ ok: true, adminEnabled: enabled, effectiveEnabled: await isAiEnabled() });
+}));
+
+// A real (tiny, fixed, non-user-data) call to Claude, so an admin can tell "the key
+// is missing" apart from "the key is set but wrong/out of credit/wrong model name" -
+// the per-request error a normal user sees is deliberately vague (never alarming
+// mid-service), so this is the only place that surfaces the real reason.
+router.post('/ai-test', asyncHandler(async (req, res) => {
+    if (!process.env.ANTHROPIC_API_KEY) return res.json({ ok: true, success: false, reason: 'ANTHROPIC_API_KEY is not set on this server.' });
+    const model = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
+    try {
+        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        await anthropic.messages.create({ model, max_tokens: 16, messages: [{ role: 'user', content: 'Reply with just the word: ok' }] });
+        res.json({ ok: true, success: true, model });
+    } catch (e) {
+        let reason = e.message || e.name || 'The request failed for an unknown reason.';
+        if (e instanceof Anthropic.AuthenticationError) reason = 'The API key was rejected as invalid or revoked.';
+        else if (e instanceof Anthropic.PermissionDeniedError) reason = 'The key is valid but not permitted here - often means no billing/payment method set up on the Anthropic account yet.';
+        else if (e instanceof Anthropic.NotFoundError) reason = 'Model "' + model + '" was not found or is not available to this key - check ANTHROPIC_MODEL.';
+        else if (e instanceof Anthropic.RateLimitError) reason = 'Rate limited by Anthropic - wait a moment and try again.';
+        res.json({ ok: true, success: false, reason, model, status: e.status || null });
+    }
 }));
 
 router.post('/users/:id/disable', asyncHandler(async (req, res) => {
