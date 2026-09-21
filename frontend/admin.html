@@ -55,7 +55,15 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
   </header>
 
   <div class="card">
-    <p class="hint">Everyone who has an account. This never shows anyone's sermon text - only a count of how many sermons each person has saved.</p>
+    <p class="hint">AI correction and translation (Claude). <code>ANTHROPIC_API_KEY</code> must be set in Render for this to work at all - the switch below is a second, admin-controlled layer on top of that, and takes effect immediately for everyone, with no redeploy needed.</p>
+    <div class="toolbar">
+      <span id="aiStatus" class="hint">Loading…</span>
+      <button id="aiToggleBtn" disabled>…</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <p class="hint">Everyone who has an account. This never shows anyone's sermon text - only a count of how many sermons each person has saved, and how much they've used the AI features (requests and characters, never the text itself).</p>
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search name or email" style="min-width:220px">
       <button id="downloadCsv">Download list as CSV</button>
@@ -73,6 +81,7 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
             <th data-sort="lastLoginAt">Last login</th>
             <th data-sort="loginCount">Logins</th>
             <th data-sort="sermonCount">Sermons</th>
+            <th data-sort="aiRequests">AI usage</th>
             <th>Status</th>
             <th>Actions</th>
           </tr>
@@ -88,8 +97,12 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
   let users = [];
   let sort = 'createdAt', dir = 'desc';
 
-  async function api(method, url) {
-    const res = await fetch(url, { method, credentials: 'same-origin' });
+  async function api(method, url, body) {
+    const res = await fetch(url, {
+      method, credentials: 'same-origin',
+      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined
+    });
     const j = await res.json().catch(() => null);
     if (!res.ok) throw new Error((j && j.error) || ('Request failed (' + res.status + ')'));
     return j;
@@ -117,6 +130,7 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
         <td data-label="Last login">${fmt(u.lastLoginAt)}</td>
         <td data-label="Logins">${u.loginCount}</td>
         <td data-label="Sermons">${u.sermonCount}</td>
+        <td data-label="AI usage">${u.aiRequests || 0} req / ${u.aiChars || 0} chars</td>
         <td data-label="Status"><span class="tag ${u.isDisabled ? 'disabled' : 'active'}">${u.isDisabled ? 'Disabled' : 'Active'}</span></td>
         <td data-label="Actions">
           <div class="actions">
@@ -126,7 +140,7 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
             <button class="danger deleteBtn" data-id="${u.id}" data-name="${esc(u.name)}">Delete</button>
           </div>
         </td>
-      </tr>`).join('') || '<tr><td colspan="8" class="hint">No one found.</td></tr>';
+      </tr>`).join('') || '<tr><td colspan="9" class="hint">No one found.</td></tr>';
 
     document.querySelectorAll('.disableBtn').forEach(b => b.addEventListener('click', () => act(b.dataset.id, 'disable')));
     document.querySelectorAll('.enableBtn').forEach(b => b.addEventListener('click', () => act(b.dataset.id, 'enable')));
@@ -145,8 +159,8 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
     } catch (e) { document.getElementById('msg').textContent = e.message; }
   }
   function downloadCsv() {
-    const cols = ['name', 'email', 'createdAt', 'lastLoginAt', 'loginCount', 'sermonCount', 'isDisabled'];
-    const header = ['Name', 'Email', 'Signed up', 'Last login', 'Logins', 'Sermons', 'Status'];
+    const cols = ['name', 'email', 'createdAt', 'lastLoginAt', 'loginCount', 'sermonCount', 'aiRequests', 'aiChars', 'isDisabled'];
+    const header = ['Name', 'Email', 'Signed up', 'Last login', 'Logins', 'Sermons', 'AI requests', 'AI characters', 'Status'];
     const lines = [header.join(',')].concat(users.map(u => cols.map(c => {
       const v = c === 'isDisabled' ? (u.isDisabled ? 'Disabled' : 'Active') : u[c];
       return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
@@ -157,6 +171,29 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
     a.download = 'sermon-scribe-users.csv';
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+
+  async function loadAiStatus() {
+    const statusEl = document.getElementById('aiStatus'), btn = document.getElementById('aiToggleBtn');
+    try {
+      const j = await api('GET', '/api/admin/ai-config');
+      if (!j.envConfigured) {
+        statusEl.textContent = 'Off - ANTHROPIC_API_KEY is not set on Render (or AI_ENABLED=false there).';
+        btn.textContent = 'Turn on';
+        btn.disabled = true; // the admin-panel switch cannot turn AI on without the env-level pieces first
+        return;
+      }
+      statusEl.textContent = j.effectiveEnabled ? 'On' : 'Off (turned off here in the admin panel)';
+      btn.textContent = j.effectiveEnabled ? 'Turn off' : 'Turn on';
+      btn.disabled = false;
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try { await api('POST', '/api/admin/ai-config', { enabled: !j.effectiveEnabled }); await loadAiStatus(); }
+        catch (e) { document.getElementById('msg').textContent = e.message; btn.disabled = false; }
+      };
+    } catch (e) {
+      statusEl.textContent = 'Could not load AI status: ' + e.message;
+    }
   }
 
   document.getElementById('backBtn').addEventListener('click', () => { location.href = '/'; });
@@ -174,6 +211,7 @@ tr.disabled td{color:var(--muted);text-decoration:line-through}
       if (me.user.role !== 'admin') { location.href = '/'; return; }
     } catch (e) { location.href = '/'; return; }
     load();
+    loadAiStatus();
   })();
 })();
 </script>

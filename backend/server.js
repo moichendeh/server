@@ -25,6 +25,7 @@ app.use('/api/screen-code', require('./routes/screenCode'));
 app.use('/api/bible', require('./routes/bible'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/me', require('./routes/me'));
+app.use('/api/ai', require('./routes/ai'));
 
 app.use(express.static(path.join(__dirname, '..', 'frontend')));
 

@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS paragraphs (
     lang TEXT NOT NULL DEFAULT 'en',
     speaker TEXT,
     text TEXT NOT NULL DEFAULT '',
+    -- AI correction/translation (see routes/ai.js) - "text" above is always exactly
+    -- what was recognized/typed, never touched by the AI; these are its output,
+    -- stored alongside it, never replacing it.
+    corrected_text TEXT,
+    translated_text TEXT,
+    translated_lang TEXT,
     created_at TEXT NOT NULL DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))
 );
 CREATE INDEX IF NOT EXISTS idx_paragraphs_sermon ON paragraphs(sermon_id, seq);
@@ -106,4 +112,23 @@ CREATE TABLE IF NOT EXISTS screen_codes (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     code TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL DEFAULT (to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))
+);
+
+-- One row per user per calendar day - counts only, never the text itself, so an admin
+-- can see usage without ever reading anyone's sermon. Also what the daily AI limit in
+-- routes/ai.js checks against.
+CREATE TABLE IF NOT EXISTS ai_usage (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    requests INTEGER NOT NULL DEFAULT 0,
+    chars_in INTEGER NOT NULL DEFAULT 0,
+    chars_out INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day)
+);
+
+-- Small global key/value store for admin-panel toggles that need to take effect
+-- immediately, without a redeploy - currently just the AI on/off switch.
+CREATE TABLE IF NOT EXISTS app_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );

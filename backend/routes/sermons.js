@@ -21,6 +21,9 @@ async function getSermonDetail(dbOrTx, id, userId) {
         lang: p.lang,
         speaker: p.speaker,
         text: p.text,
+        correctedText: p.corrected_text,
+        translatedText: p.translated_text,
+        translatedLang: p.translated_lang,
         refs: mentionRows
             .filter(m => m.paragraph_id === p.id)
             .map(m => ({ bookNr: m.book_nr, chapter: m.chapter, from: m.from_verse, to: m.to_verse }))
@@ -92,13 +95,18 @@ router.patch('/:id', asyncHandler(async (req, res) => {
 
         if (Array.isArray(req.body.paragraphs)) {
             await tx.prepare('DELETE FROM paragraphs WHERE sermon_id = ? AND user_id = ?').run(id, req.user.id); // cascades to scripture_mentions
-            const insertPara = tx.prepare('INSERT INTO paragraphs (sermon_id, user_id, seq, t, lang, speaker, text) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id');
+            const insertPara = tx.prepare('INSERT INTO paragraphs (sermon_id, user_id, seq, t, lang, speaker, text, corrected_text, translated_text, translated_lang) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id');
             const insertMention = tx.prepare(
                 'INSERT INTO scripture_mentions (sermon_id, user_id, paragraph_id, book_nr, chapter, from_verse, to_verse, whole, check_flag, follow_up, mention_count, at_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
             for (let idx = 0; idx < req.body.paragraphs.length; idx++) {
                 const p = req.body.paragraphs[idx];
-                const info = await insertPara.run(id, req.user.id, idx, Number(p.t) || 0, String(p.lang || 'en').slice(0, 20), p.speaker ? String(p.speaker).slice(0, 100) : null, String(p.text || '').slice(0, 10000));
+                const info = await insertPara.run(
+                    id, req.user.id, idx, Number(p.t) || 0, String(p.lang || 'en').slice(0, 20), p.speaker ? String(p.speaker).slice(0, 100) : null, String(p.text || '').slice(0, 10000),
+                    p.correctedText ? String(p.correctedText).slice(0, 10000) : null,
+                    p.translatedText ? String(p.translatedText).slice(0, 10000) : null,
+                    p.translatedLang ? String(p.translatedLang).slice(0, 20) : null
+                );
                 const paraId = Number(info.lastInsertRowid);
                 for (const r of (p.refs || [])) {
                     await insertMention.run(

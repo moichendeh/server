@@ -93,6 +93,8 @@ backups - check their dashboard.
 - `ADMIN_EMAILS` - a comma-separated list of email addresses that should be Admins,
   e.g. `pastor@example.com,office@example.com`. See below.
 - `API_BIBLE_KEY` - optional, see **Bible translations** below.
+- `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `AI_ENABLED`, `AI_DAILY_CHAR_LIMIT`,
+  `AI_DAILY_REQUEST_LIMIT` - optional, see **AI correction and translation** below.
 
 If you ever need to recreate `.env`, copy `backend/.env.example` to `backend/.env`
 and fill in your own values.
@@ -113,6 +115,58 @@ the same for everyone) so the same chapter is only ever fetched from api.bible o
 If `API_BIBLE_KEY` isn't set, or your api.bible account hasn't been granted one of
 these translations, that translation just reports "not available" rather than
 breaking anything else.
+
+## AI correction and translation
+
+Turned on per-user, in **My account → "Use AI correction and translation"** (off by
+default). When it's on:
+
+- **Correction.** Once a paragraph is finished (a pause, or the next paragraph
+  starting - never a word while it's still being recognized), it's sent once to
+  Claude to fix spelling, grammar, punctuation and misheard Bible book names/numbers.
+  The **original text is never changed** - the correction is stored alongside it, and
+  a small **Original / Corrected** switch appears on that paragraph once it arrives.
+  Editing a paragraph by hand at any point - in either view - is never later
+  overwritten by a slower AI reply for that same paragraph.
+- **Translation.** The "Translate to" setting in the toolbar (None/English/German/
+  Krio) translates each finished paragraph and shows it in smaller text underneath.
+  Works in every direction the languages allow (German ↔ English, and any spoken/typed
+  language ↔ Krio) - a translation into or out of **Krio or Twi is always labelled
+  "draft translation, please review"**, since Claude is noticeably less reliable in
+  those two.
+- **Krio** is a fourth language button next to English/Deutsch/Twi. Like Twi, there is
+  no live transcription for it (browsers can't do that) - it's typed/pasted notes only.
+- **Bible verses on the projector are unaffected** - they still come from the Bible
+  translation sources (see above), never from the AI.
+- **Downloads.** The Export card has a "Text to include" choice: Original, Corrected,
+  Original + Corrected, Translation only, Original + Translation, or side by side.
+
+Everything above requires being logged in, and needs a couple of things set on the
+server (see below) - if the AI is off, unconfigured, or a request fails for any
+reason, the app keeps working exactly as before with the plain original text; nothing
+about note-taking, scripture detection, or projecting is ever blocked by this feature.
+
+### Cost and abuse protection
+
+- Requests only ever come from the backend - the browser never talks to Anthropic
+  directly, and never sees the API key.
+- One Claude call handles both correction and translation together when both are
+  needed, instead of two - it's cheaper and it's the only way this feature is built.
+- Two independent daily caps per user, both configurable by environment variable:
+  `AI_DAILY_CHAR_LIMIT` (default 150,000 characters/day) and
+  `AI_DAILY_REQUEST_LIMIT` (default 1,000 requests/day). Hitting either one returns a
+  clear "You reached today's limit. The rest of your notes are still saved." message
+  - text keeps saving normally, it just stops being corrected/translated until the
+  next day.
+- Rate limiting (20 requests/minute per logged-in user) on top of the daily caps, to
+  stop a runaway loop rather than a real person.
+- Usage (request and character **counts only, never the text**) is logged per user
+  per day in the database and shown on the Admin page, next to each person's sermon
+  count.
+- Two independent off-switches: the `AI_ENABLED` environment variable (site-wide,
+  needs a redeploy to change) and a button on the Admin page (takes effect
+  immediately for everyone, no redeploy - this is the "turn it off right now" switch).
+  Both need `ANTHROPIC_API_KEY` to be set in the first place.
 
 ## Accounts and the Admin page
 
@@ -228,13 +282,21 @@ own throwaway database - never your real data:
   from `bible_cache` instead of calling api.bible again, and reports a translation
   this account has no api.bible access to as unavailable rather than crashing. Runs
   against a fake api.bible (no real key or network call needed).
+- **test/ai.test.js** - the AI correction/translation endpoint: requires login,
+  correcting sample English/German/Krio text, translating German↔English (not
+  flagged as a draft) and English→Krio (always flagged as a draft), a garbled AI
+  reply degrading to "nothing changed" rather than crashing, a failed Anthropic
+  request being reported cleanly, the daily character limit blocking further
+  requests with the "still saved" message, and the admin on/off switch taking effect
+  immediately. Runs against a fake Claude API (no real key, no network call, no cost).
 
 By default these run against local Postgres databases named `sermon_scribe_test`,
 `sermon_scribe_test_isolation`, `sermon_scribe_test_admin`, `sermon_scribe_test_privacy`,
-`sermon_scribe_test_live`, `sermon_scribe_test_ratelimit`, and `sermon_scribe_test_bible`.
-Point any of them elsewhere with `DATABASE_URL_TEST`, `DATABASE_URL_TEST_ISOLATION`,
-`DATABASE_URL_TEST_ADMIN`, `DATABASE_URL_TEST_PRIVACY`, `DATABASE_URL_TEST_LIVE`,
-`DATABASE_URL_TEST_RATELIMIT`, or `DATABASE_URL_TEST_BIBLE`.
+`sermon_scribe_test_live`, `sermon_scribe_test_ratelimit`, `sermon_scribe_test_bible`,
+and `sermon_scribe_test_ai`. Point any of them elsewhere with `DATABASE_URL_TEST`,
+`DATABASE_URL_TEST_ISOLATION`, `DATABASE_URL_TEST_ADMIN`, `DATABASE_URL_TEST_PRIVACY`,
+`DATABASE_URL_TEST_LIVE`, `DATABASE_URL_TEST_RATELIMIT`, `DATABASE_URL_TEST_BIBLE`, or
+`DATABASE_URL_TEST_AI`.
 
 ## Security notes
 
@@ -284,6 +346,13 @@ so they're never committed to git):
   needed only for the NIV, AMP and CSB translations (see **Bible translations** below).
   Leave it blank and those three translations simply show as unavailable - everything
   else works without it.
+- `ANTHROPIC_API_KEY` - optional. Your API key from [console.anthropic.com](https://console.anthropic.com),
+  needed only for AI correction/translation (see **AI correction and translation**
+  above). Leave it blank and those features just report as turned off.
+
+`ANTHROPIC_MODEL`, `AI_ENABLED`, `AI_DAILY_CHAR_LIMIT` and `AI_DAILY_REQUEST_LIMIT` are
+also in `render.yaml`, already filled in with working defaults - you only need to touch
+them if you want to change the model or the daily caps.
 
 `NODE_ENV=production` is already set for you in `render.yaml` - this is what turns on
 `secure` cookies (HTTPS-only), which only works correctly once the app is actually
